@@ -1,0 +1,44 @@
+# Dependencies and build output
+node_modules/
+dist/
+target/
+venv/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+
+# Secrets and local machine state
+.env
+.env.*
+!.env.example
+signing-key.json
+*.pem
+.device-credentials.json
+.metric-snapshot-state.json
+
+# Local databases and compiled binaries
+*.db
+*.db-shm
+*.db-wal
+*.exe
+*.exe~
+command-center.exe
+pulse-telemetry.exe
+telemetry-server.exe
+installer/output/
+installer/redist/
+backend/releases/
+*.msi
+.device-credentials.json
+.device-credentials.json.*
+*.bak
+
+# IDE / OS
+.cursor/
+.claude/
+.vscode/
+Thumbs.db
+Desktop.ini
+.DS_Store

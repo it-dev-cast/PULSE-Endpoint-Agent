@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "allow-create-remote-session"
+description = "Create a remote assist signaling session via the local telemetry server"
+commands.allow = ["create_remote_session"]

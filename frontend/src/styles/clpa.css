@@ -1,0 +1,164 @@
+/* CLPA shell + card utilities */
+.clpa-scroll::-webkit-scrollbar {
+  display: none;
+}
+
+.clpa-page-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(148, 163, 184, 0.55) transparent;
+}
+
+.clpa-page-scroll::-webkit-scrollbar {
+  width: 6px;
+}
+
+.clpa-page-scroll::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.55);
+  border-radius: 999px;
+}
+
+.clpa-page-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.clpa-card-hover {
+  transition: box-shadow 0.15s, transform 0.15s;
+}
+
+.clpa-card-hover:hover {
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.1) !important;
+  transform: translateY(-1px);
+}
+
+@keyframes clpa-dot-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.4;
+  }
+}
+
+.clpa-dot {
+  animation: clpa-dot-pulse 2s ease-in-out infinite;
+}
+
+@keyframes clpa-fan-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.clpa-fan-spin {
+  animation: clpa-fan-spin 1.2s linear infinite;
+}
+
+.clpa-page {
+  display: flex;
+  flex-direction: column;
+  /* Real Settings > View: Comfortable/Compact density (theme.css's --clpa-space-page) - not a
+     hardcoded 10px anymore, so the density toggle genuinely tightens page layout app-wide. */
+  gap: var(--clpa-space-page);
+}
+
+.clpa-page--compact {
+  gap: 8px;
+}
+
+/* Sample-data indicator (App.tsx's SampleTag) - a quiet circular "i" replacing the old literal
+   "(sample)" text. The tooltip below is a nice-to-have for sighted users; `title` + `aria-label`
+   on the element itself are the actual guaranteed disclosure (see the comment on SampleTag). */
+.clpa-sample-tag {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  border: 1px solid #94a3b8;
+  color: #94a3b8;
+  font-size: 7px;
+  font-weight: 700;
+  font-style: normal;
+  line-height: 1;
+  cursor: help;
+  position: relative;
+}
+
+.clpa-sample-tag:focus-visible {
+  outline: 2px solid #94a3b8;
+  outline-offset: 2px;
+}
+
+.clpa-sample-tag::after {
+  content: attr(data-tip);
+  position: absolute;
+  bottom: calc(100% + 5px);
+  left: 50%;
+  transform: translateX(-50%);
+  background: #334155;
+  color: #ffffff;
+  font-size: 9px;
+  font-weight: 500;
+  font-style: normal;
+  white-space: nowrap;
+  padding: 4px 7px;
+  border-radius: 5px;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity 0.12s ease;
+  z-index: 50;
+}
+
+.clpa-sample-tag:hover::after,
+.clpa-sample-tag:focus-visible::after {
+  opacity: 1;
+  visibility: visible;
+}
+
+/* Generic keyboard-focus ring for interactive elements that don't already get one from a
+   browser default (custom-styled buttons/inputs/links) - added for the Remote Assist redesign,
+   usable anywhere a visible focus indicator is needed. */
+.clpa-focusable:focus-visible {
+  outline: 2px solid #3b82f6;
+  outline-offset: 2px;
+}
+
+/* State (connection status, pause/resume, etc.) must never rely on animation alone - the color/
+   label/icon changes already carry that meaning without motion, so it's safe to fully disable
+   the decorative pulse/spin for users who've asked the OS not to animate things. */
+/* Auto-lock on idle overlay - fades in/out; the lock state itself is always conveyed by content
+   (the message + button), never by the animation alone, so reduced-motion below just drops the
+   transition and shows/hides instantly. */
+.clpa-lock-overlay {
+  transition: opacity 0.18s ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .clpa-dot {
+    animation: none;
+  }
+
+  .clpa-fan-spin {
+    animation: none;
+  }
+
+  .clpa-card-hover {
+    transition: none;
+  }
+
+  .clpa-lock-overlay {
+    transition: none;
+  }
+}
+
+.clpa-health-good { color: #15803D !important; }
+.clpa-health-fair { color: #CA8A04 !important; }
+.clpa-health-poor { color: #DC2626 !important; }
+.clpa-health-unknown { color: #64748B !important; }

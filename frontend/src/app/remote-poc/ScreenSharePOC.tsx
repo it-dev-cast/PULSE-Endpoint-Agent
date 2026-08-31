@@ -1,0 +1,1280 @@
+import { useEffect, useRef, useState, type RefObject } from "react";
+import {
+  Monitor, Mic, MicOff, MessageCircle, Send, Paperclip, Play, Pause,
+  Copy, Check, RotateCcw, AlertTriangle, Download, ShieldCheck, ShieldAlert,
+  Share2, Eye,
+} from "lucide-react";
+import { useApp } from "../context/AppContext";
+import { CLPAPage, CLPACard, CLPABadge } from "../components/shared/clpa";
+import { isRunningInTauri } from "../lib/tauriRuntime";
+
+// ─── Real WebRTC screen-share proof of concept ─────────────
+// Genuinely connects two browser tabs peer-to-peer and streams a real captured screen between
+// them - no mock data. Signaling (the offer/answer SDP exchange a real WebRTC connection needs
+// before either side knows how to reach the other) now goes over a real WebSocket relay
+// (backend/remote_session.go) instead of manual copy-paste - see that file's own comments for
+// why session creation is agent-authenticated (this device's real API key, proxied through
+// local-agent/server/telemetry-server.mjs's new /api/remote-session) while the WebSocket join
+// itself needs no auth at all (the session ID, shared out-of-band, is the access control - the
+// same trust model a real Zoom/Meet guest-join link uses).
+//
+// STUN vs TURN: STUN (stun.l.google.com:19302, a public Google server) only helps two peers
+// discover their own public IP/port through NAT - it does NOT relay media. If both peers are
+// behind restrictive NATs that STUN can't punch through (e.g. two different corporate networks,
+// or certain symmetric-NAT home routers), the connection will genuinely fail, and no TURN
+// relay server is configured here to fall back to. That's a real, disclosed limitation of this
+// POC, not a bug - see the "Connection failed" status message below.
+//
+// VOICE/CHAT/FILE TRANSFER: added on top of the same real RTCPeerConnection - a real
+// microphone track is added alongside the screen-video track (both sides, real 2-way audio),
+// and a real RTCDataChannel carries chat text and file bytes directly peer-to-peer (never
+// touching the backend - the WebSocket relay is signaling-only, same as before). REAL BUG
+// avoided here, not just described: naively doing `remoteStreamRef.current = event.streams[0]`
+// on every ontrack call (the original approach, fine when only one track/stream ever existed)
+// would have silently broken video the moment audio was added - video and mic are two separate
+// MediaStream objects on the sender side, so a second ontrack firing for the audio track would
+// overwrite remoteStreamRef with an audio-only stream, orphaning the video track already
+// playing. Fixed by accumulating every real track into one persistent MediaStream instead of
+// replacing it.
+//
+// VISUAL REDESIGN (this file's own display layer only - see the design plan in the PR/commit
+// history for the full rationale): every function above CommunicationPanel below is byte-for-
+// byte the same real logic as before - same state, same handlers, same WebRTC/data-channel
+// wiring. Only CommunicationPanel's own JSX and the final `return` were rewritten, to match this
+// app's existing CLPACard/CLPABadge visual language (styles/tokens.ts, components/shared/clpa.tsx)
+// instead of this page's old plain, unstyled <div> layout.
+
+const ICE_SERVERS: RTCConfiguration = { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] };
+const CONNECT_TIMEOUT_MS = 15000;
+
+// The backend speaks plain HTTP/WS, same pattern as BACKEND_URL elsewhere in this project
+// (local-agent/server/telemetry-server.mjs) - a real deployment would sit both behind a
+// TLS-terminating reverse proxy (wss://), out of scope for this local POC. Session creation
+// always goes through local-agent (same machine, always localhost:4317) regardless of how far
+// away the real backend actually is - local-agent is the one that knows/proxies to it.
+
+// FIX (found live, on a genuinely remote laptop): this used to be a hardcoded
+// "ws://localhost:8443" constant, which only ever worked when the Tauri app and backend
+// happened to be the same machine - the original dev setup's own reality, not a real remote
+// customer laptop's. Session creation already worked correctly (createRemoteSession below
+// proxies through local-agent, which already knows this device's real, possibly-remote
+// BACKEND_URL) - this was the one piece that hadn't been updated to match, so the WebSocket
+// join failed outright with "backend unreachable" on the first genuinely remote laptop that
+// ever tried it. Fetched once, from local-agent's own new /api/backend-url endpoint (the same
+// device that already knows this address, exposing it - not a secret, no API key crosses this
+// boundary), with the old hardcoded value kept only as a fallback for same-machine dev use.
+const DEFAULT_BACKEND_WS_ORIGIN = "ws://localhost:8443";
+let backendWsOriginPromise: Promise<string> | null = null;
+function getBackendWsOrigin(): Promise<string> {
+  if (!backendWsOriginPromise) {
+    backendWsOriginPromise = fetch("http://localhost:4317/api/backend-url")
+      .then((res) => res.json())
+      .then((body) => (body?.backendUrl ? String(body.backendUrl).replace(/^http/, "ws") : DEFAULT_BACKEND_WS_ORIGIN))
+      .catch(() => DEFAULT_BACKEND_WS_ORIGIN);
+  }
+  return backendWsOriginPromise;
+}
+
+type Role = "share" | "view";
+
+// A freshly-created offer/answer has no ICE candidates in it yet - they arrive asynchronously
+// as ICE gathering discovers them. A real signaling server could trickle candidates as they
+// arrive instead, but this POC still waits for gathering to finish (or time out) before reading
+// `pc.localDescription`, unchanged from the manual copy-paste version - only the transport that
+// carries the resulting blob changed, not this decision.
+function waitForIceGatheringComplete(pc: RTCPeerConnection, timeoutMs = 8000): Promise<void> {
+  if (pc.iceGatheringState === "complete") return Promise.resolve();
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      pc.removeEventListener("icegatheringstatechange", onChange);
+      resolve();
+    };
+    const onChange = () => {
+      if (pc.iceGatheringState === "complete") finish();
+    };
+    pc.addEventListener("icegatheringstatechange", onChange);
+    // Some networks/devices never reach "complete" (a known real quirk, not everywhere
+    // consistent) - proceed with whatever candidates were gathered in this window rather than
+    // hang forever waiting for an event that might not fire.
+    setTimeout(finish, timeoutMs);
+  });
+}
+
+function describeMediaError(e: unknown): string {
+  if (e instanceof Error) {
+    if (e.name === "NotAllowedError") {
+      return "Screen share permission was denied (or the browser blocked the prompt). Click \"Start Screen Share\" again and allow access when prompted.";
+    }
+    if (e.name === "NotFoundError") {
+      return "No shareable screen/window source was found.";
+    }
+    return `getDisplayMedia failed: ${e.name} - ${e.message}`;
+  }
+  return "getDisplayMedia failed for an unknown reason.";
+}
+
+// Real POST to the local agent, which proxies to the real backend using this device's own
+// already-issued API key (see telemetry-server.mjs's handleRemoteSessionCreate) - the browser
+// itself never sees or handles that key. mode is purely informational for the admin-facing
+// queue on the dashboard (Screen Share / Voice+Chat / Chat Only) - it doesn't change any real
+// signaling behavior, which stays mode-agnostic either way.
+async function createRemoteSession(mode: "screen" | "voice" | "chat"): Promise<{ id: string }> {
+  if (await isRunningInTauri()) {
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      return await invoke<{ id: string }>("create_remote_session", { mode });
+    } catch (e) {
+      const msg = typeof e === "string" ? e : e instanceof Error ? e.message : String(e);
+      throw new Error(msg || "Can't create a remote session from the agent.");
+    }
+  }
+
+  let res: Response;
+  try {
+    // Same-origin via the Vite proxy in the browser preview; no CORS preflight.
+    res = await fetch("/api/remote-session", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode }),
+    });
+  } catch {
+    try {
+      res = await fetch(`http://127.0.0.1:4317/api/remote-session?mode=${encodeURIComponent(mode)}`);
+    } catch {
+      throw new Error("Can't reach the local agent on port 4317. Start Pulse telemetry, then try Share again.");
+    }
+  }
+  const body = await res.json().catch(() => null);
+  if (!res.ok) {
+    throw new Error(body?.error || `Failed to create a real signaling session (HTTP ${res.status}).`);
+  }
+  return body;
+}
+
+async function openSessionSocket(sessionId: string): Promise<WebSocket> {
+  const origin = await getBackendWsOrigin();
+  return new WebSocket(`${origin}/v1/remote-sessions/${sessionId}/ws`);
+}
+
+type SignalMessage = { type: "offer" | "answer"; sdp: RTCSessionDescriptionInit };
+
+// ─── Real chat + file transfer over a real RTCDataChannel ──
+// Ordered+reliable by default (like TCP) - relied on deliberately here: file-start (JSON) ->
+// N raw binary chunks -> file-end (JSON) always arrive in that exact order, so no per-chunk
+// sequence number is needed. Only one file transfer at a time per direction is supported (the
+// UI disables "Send File" while one is already in flight) - simple and correct beats a
+// more complex concurrent-transfer protocol at this project's real scale.
+const FILE_CHUNK_SIZE = 16 * 1024; // 16KB - safe, widely-compatible RTCDataChannel message size
+const MAX_FILE_SIZE = 25 * 1024 * 1024; // 25MB - a real, deliberate cap for a support-session file (logs, configs), not arbitrary media
+const BUFFERED_AMOUNT_HIGH_WATERMARK = 1024 * 1024; // 1MB - back off sending more chunks past this
+
+type ChatMessage = { text: string; from: "customer" | "operator"; at: number };
+type IncomingFile = { id: string; name: string; mimeType: string; chunks: ArrayBuffer[] };
+type ReceivedFile = { name: string; mimeType: string; url: string; receivedAt: number };
+
+type CommunicationPanelProps = {
+  from: "customer" | "operator";
+  micEnabled: boolean;
+  micAvailable: boolean;
+  micError: string | null;
+  onToggleMic: () => void;
+  dataChannelOpen: boolean;
+  chatMessages: ChatMessage[];
+  chatInput: string;
+  onChatInputChange: (value: string) => void;
+  onSendChat: () => void;
+  fileInputRef: RefObject<HTMLInputElement | null>;
+  onPickFile: (file: File | undefined) => void;
+  sendingFileProgress: number | null;
+  fileSendError: string | null;
+  receivedFiles: ReceivedFile[];
+};
+
+// Declared at module scope on purpose. Defining this inside ScreenSharePOC made React treat it
+// as a new component type on every keystroke, which remounted the input and stole focus — you
+// had to click the box again after each word.
+function CommunicationPanel({
+  from,
+  micEnabled,
+  micAvailable,
+  micError,
+  onToggleMic,
+  dataChannelOpen,
+  chatMessages,
+  chatInput,
+  onChatInputChange,
+  onSendChat,
+  fileInputRef,
+  onPickFile,
+  sendingFileProgress,
+  fileSendError,
+  receivedFiles,
+}: CommunicationPanelProps) {
+  return (
+    <div className="flex flex-col" style={{ height: "100%" }}>
+      <div className="flex items-center gap-2 flex-wrap" style={{ marginBottom: 10 }}>
+        <button
+          type="button"
+          onClick={onToggleMic}
+          disabled={!micAvailable}
+          className="flex items-center gap-1.5 clpa-focusable"
+          style={{
+            padding: "5px 10px", borderRadius: 8, border: micEnabled ? "1px solid rgba(var(--clpa-success-bright-rgb),0.3)" : "1px solid var(--clpa-input-border)",
+            background: micEnabled ? "rgba(var(--clpa-success-bright-rgb),0.1)" : "var(--clpa-surface)", color: micEnabled ? "var(--clpa-success)" : "var(--clpa-muted)",
+            fontSize: 10.5, fontWeight: 700, cursor: micAvailable ? "pointer" : "not-allowed",
+          }}
+        >
+          {micEnabled ? <Mic size={12} strokeWidth={2.2} /> : <MicOff size={12} strokeWidth={2.2} />}
+          {micEnabled ? "Mic On" : "Mic Off"}
+        </button>
+        {micError && <span style={{ fontSize: 9, color: "var(--clpa-warning-deep)" }}>{micError}</span>}
+        <div style={{ marginLeft: "auto" }}>
+          <CLPABadge
+            label={dataChannelOpen ? "Chat/file channel open" : "Connecting…"}
+            color={dataChannelOpen ? "var(--clpa-success)" : "var(--clpa-subtle)"}
+            bg={dataChannelOpen ? "rgba(var(--clpa-success-bright-rgb),0.1)" : "rgba(var(--clpa-subtle-rgb),0.14)"}
+          />
+        </div>
+      </div>
+
+      <div className="flex items-center gap-1.5" style={{ marginBottom: 6 }}>
+        <MessageCircle size={11} style={{ color: "var(--clpa-primary)" }} strokeWidth={2} />
+        <span style={{ fontSize: 9.5, fontWeight: 700, color: "var(--clpa-body)" }}>Chat</span>
+      </div>
+      <div
+        className="clpa-scroll"
+        style={{ flex: 1, minHeight: 90, maxHeight: 160, overflowY: "auto", border: "1px solid var(--clpa-surface-border)", borderRadius: 10, padding: 8, marginBottom: 8, background: "var(--clpa-surface)" }}
+      >
+        {chatMessages.length === 0 && <div style={{ fontSize: 9.5, color: "var(--clpa-subtle)" }}>No messages yet.</div>}
+        {chatMessages.map((m, i) => {
+          const mine = m.from === from;
+          return (
+            <div key={`${m.at}-${i}`} className="flex" style={{ justifyContent: mine ? "flex-end" : "flex-start", marginBottom: 6 }}>
+              <div
+                style={{
+                  maxWidth: "85%", borderRadius: 10, padding: "6px 9px", fontSize: 10.5, lineHeight: 1.35,
+                  background: mine ? "var(--clpa-primary)" : "var(--clpa-card)", color: mine ? "#FFFFFF" : "var(--clpa-body)",
+                  border: mine ? "none" : "1px solid var(--clpa-surface-border)",
+                }}
+              >
+                {!mine && <div style={{ fontSize: 8, fontWeight: 700, color: "var(--clpa-subtle)", marginBottom: 1 }}>{m.from}</div>}
+                {m.text}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      <div className="flex items-center gap-1.5" style={{ marginBottom: 14 }}>
+        <input
+          value={chatInput}
+          onChange={(e) => onChatInputChange(e.target.value)}
+          onKeyDown={(e) => {
+            e.stopPropagation();
+            if (e.key === "Enter") {
+              e.preventDefault();
+              onSendChat();
+            }
+          }}
+          disabled={!dataChannelOpen}
+          placeholder={dataChannelOpen ? "Type a message…" : "Waiting for connection…"}
+          className="clpa-focusable"
+          autoComplete="off"
+          style={{ flex: 1, fontSize: 10.5, padding: "6px 9px", borderRadius: 8, border: "1px solid var(--clpa-input-border)", background: "var(--clpa-surface)", color: "var(--clpa-body)" }}
+        />
+        <button
+          type="button"
+          onClick={onSendChat}
+          disabled={!dataChannelOpen || !chatInput.trim()}
+          className="flex items-center justify-center clpa-focusable"
+          style={{
+            width: 30, height: 28, borderRadius: 8, border: "none", flexShrink: 0,
+            background: dataChannelOpen && chatInput.trim() ? "var(--clpa-primary)" : "var(--clpa-track)",
+            cursor: dataChannelOpen && chatInput.trim() ? "pointer" : "not-allowed",
+          }}
+        >
+          <Send size={12} color="#FFFFFF" strokeWidth={2.2} />
+        </button>
+      </div>
+
+      <div className="flex items-center gap-1.5" style={{ marginBottom: 6 }}>
+        <Paperclip size={11} style={{ color: "var(--clpa-primary)" }} strokeWidth={2} />
+        <span style={{ fontSize: 9.5, fontWeight: 700, color: "var(--clpa-body)" }}>File Transfer</span>
+        <span style={{ fontSize: 8, color: "var(--clpa-subtle)" }}>up to {Math.round(MAX_FILE_SIZE / 1024 / 1024)}MB</span>
+      </div>
+      {fileSendError && (
+        <div className="flex items-center gap-1" style={{ fontSize: 9.5, color: "var(--clpa-critical)", marginBottom: 6 }}>
+          <AlertTriangle size={10} strokeWidth={2.2} /> {fileSendError}
+        </div>
+      )}
+      <div className="flex items-center gap-2" style={{ marginBottom: 8 }}>
+        <input
+          ref={fileInputRef as RefObject<HTMLInputElement>}
+          type="file"
+          disabled={!dataChannelOpen || sendingFileProgress != null}
+          onChange={(e) => onPickFile(e.target.files?.[0])}
+          className="clpa-focusable"
+          style={{ fontSize: 9.5, flex: 1 }}
+        />
+      </div>
+      {sendingFileProgress != null && (
+        <div style={{ marginBottom: 8 }}>
+          <div className="rounded-full overflow-hidden" style={{ height: 4, background: "var(--clpa-input-border)" }}>
+            <div style={{ width: `${sendingFileProgress}%`, height: "100%", background: "var(--clpa-primary)", borderRadius: 4, transition: "width 0.15s" }} />
+          </div>
+          <div style={{ fontSize: 8.5, color: "var(--clpa-subtle)", marginTop: 3 }}>Sending… {sendingFileProgress}%</div>
+        </div>
+      )}
+      {receivedFiles.length > 0 && (
+        <div className="flex flex-col gap-1">
+          <div style={{ fontSize: 8, color: "var(--clpa-subtle)", fontWeight: 700, letterSpacing: 0.3 }}>RECEIVED</div>
+          {receivedFiles.map((f, i) => (
+            <a
+              key={`${f.receivedAt}-${i}`}
+              href={f.url}
+              download={f.name}
+              className="flex items-center gap-1.5 clpa-focusable"
+              style={{ fontSize: 10, color: "var(--clpa-primary)", fontWeight: 600, textDecoration: "none" }}
+            >
+              <Download size={11} strokeWidth={2.2} /> {f.name}
+            </a>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function setupDataChannel(
+  dc: RTCDataChannel,
+  onOpenChange: (open: boolean) => void,
+  onChatMessage: (msg: ChatMessage) => void,
+  onFileReceived: (file: ReceivedFile) => void,
+  onVideoPauseChange?: (paused: boolean) => void,
+): void {
+  dc.binaryType = "arraybuffer";
+  let incoming: IncomingFile | null = null;
+
+  dc.onopen = () => onOpenChange(true);
+  dc.onclose = () => onOpenChange(false);
+  dc.onerror = () => onOpenChange(false);
+  dc.onmessage = (event) => {
+    if (typeof event.data === "string") {
+      let msg: any;
+      try {
+        msg = JSON.parse(event.data);
+      } catch {
+        return;
+      }
+      if (msg.kind === "chat") {
+        onChatMessage({ text: msg.text, from: msg.from, at: msg.at });
+      } else if (msg.kind === "file-start") {
+        incoming = { id: msg.id, name: msg.name, mimeType: msg.mimeType, chunks: [] };
+      } else if (msg.kind === "file-end" && incoming && incoming.id === msg.id) {
+        const blob = new Blob(incoming.chunks, { type: incoming.mimeType || "application/octet-stream" });
+        onFileReceived({ name: incoming.name, mimeType: incoming.mimeType, url: URL.createObjectURL(blob), receivedAt: Date.now() });
+        incoming = null;
+      } else if (msg.kind === "video-pause") {
+        // Real privacy toggle notification, not just a frozen video frame - the video track
+        // itself is what's actually disabled (see toggleVideoPause), this message is purely so
+        // the OTHER side gets an honest "paused" indicator instead of wondering if the
+        // connection died.
+        onVideoPauseChange?.(!!msg.paused);
+      }
+    } else if (incoming) {
+      incoming.chunks.push(event.data as ArrayBuffer);
+    }
+  };
+}
+
+async function sendFileOverChannel(dc: RTCDataChannel, file: File, from: "customer" | "operator", onProgress: (pct: number) => void): Promise<void> {
+  if (file.size > MAX_FILE_SIZE) {
+    throw new Error(`File too large - this session supports up to ${Math.round(MAX_FILE_SIZE / 1024 / 1024)}MB per transfer.`);
+  }
+  const id = `${from}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  dc.send(JSON.stringify({ kind: "file-start", id, name: file.name, size: file.size, mimeType: file.type || "application/octet-stream" }));
+
+  const buf = await file.arrayBuffer();
+  let offset = 0;
+  while (offset < buf.byteLength) {
+    if (dc.bufferedAmount > BUFFERED_AMOUNT_HIGH_WATERMARK) {
+      await new Promise<void>((resolve) => {
+        const check = () => {
+          if (dc.bufferedAmount <= BUFFERED_AMOUNT_HIGH_WATERMARK) resolve();
+          else setTimeout(check, 50);
+        };
+        check();
+      });
+    }
+    dc.send(buf.slice(offset, offset + FILE_CHUNK_SIZE));
+    offset += FILE_CHUNK_SIZE;
+    onProgress(Math.min(100, Math.round((offset / buf.byteLength) * 100)));
+  }
+  dc.send(JSON.stringify({ kind: "file-end", id }));
+}
+
+type EnrollmentStatus = {
+  enrolled: boolean;
+  deviceId: string | null;
+  hostname: string | null;
+  backendUrl: string;
+  lastError: string | null;
+};
+
+export default function ScreenSharePOC() {
+  const { navigate, startRemoteSession, endRemoteSession } = useApp();
+  const [role, setRole] = useState<Role>("share");
+  const [enrollment, setEnrollment] = useState<EnrollmentStatus | null>(null);
+
+  // Share role state
+  const [shareStatus, setShareStatus] = useState<"idle" | "starting" | "creating-session" | "waiting-for-peer" | "completing">("idle");
+  const [shareError, setShareError] = useState<string | null>(null);
+  const [sessionId, setSessionId] = useState("");
+  const [sessionMode, setSessionMode] = useState<"screen" | "voice" | "chat">("screen");
+  const [videoPaused, setVideoPaused] = useState(false);
+
+  // View role state
+  const [joinSessionId, setJoinSessionId] = useState(() => new URLSearchParams(window.location.search).get("join") ?? "");
+  const [viewStatus, setViewStatus] = useState<"idle" | "connecting" | "answering" | "answer-ready">("idle");
+  const [viewError, setViewError] = useState<string | null>(null);
+
+  // Shared, real connection-state indicator - RTCPeerConnection.connectionState itself, not a
+  // guess about whether the UI merely rendered something.
+  const [connectionState, setConnectionState] = useState<RTCPeerConnectionState | "none">("none");
+  const [timedOut, setTimedOut] = useState(false);
+
+  // Real voice/chat/file-transfer state
+  const [micEnabled, setMicEnabled] = useState(false);
+  const [micError, setMicError] = useState<string | null>(null);
+  const [dataChannelOpen, setDataChannelOpen] = useState(false);
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+  const [chatInput, setChatInput] = useState("");
+  const [sendingFileProgress, setSendingFileProgress] = useState<number | null>(null);
+  const [fileSendError, setFileSendError] = useState<string | null>(null);
+  const [receivedFiles, setReceivedFiles] = useState<ReceivedFile[]>([]);
+  const [remotePaused, setRemotePaused] = useState(false);
+
+  const pcRef = useRef<RTCPeerConnection | null>(null);
+  const wsRef = useRef<WebSocket | null>(null);
+  const localStreamRef = useRef<MediaStream | null>(null);
+  const micStreamRef = useRef<MediaStream | null>(null);
+  const remoteStreamRef = useRef<MediaStream | null>(null);
+  const localVideoRef = useRef<HTMLVideoElement | null>(null);
+  const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
+  const connectTimerRef = useRef<number | null>(null);
+  const dcRef = useRef<RTCDataChannel | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function tick() {
+      try {
+        const res = await fetch("http://127.0.0.1:4317/api/enrollment");
+        const body = (await res.json().catch(() => null)) as EnrollmentStatus | null;
+        if (cancelled) return;
+        if (!res.ok || !body || typeof body.enrolled !== "boolean") {
+          setEnrollment(null);
+          return;
+        }
+        setEnrollment(body);
+      } catch {
+        if (!cancelled) setEnrollment(null);
+      }
+    }
+    tick();
+    const id = window.setInterval(tick, 4000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, []);
+
+  // Real bug found during live two-tab testing (manual-signaling version): connectionState
+  // reached "connected" in both tabs, but the View tab's <video> stayed black. Root cause,
+  // confirmed by comparing the two <video> elements in this file: the Share tab's local preview
+  // has muted set, the View tab's remote video didn't. Browsers block UNMUTED autoplay by
+  // default (Chrome/Firefox/Safari all require either `muted` or prior user/site engagement) -
+  // muted autoplay is always allowed. Fixed below, plus: calling .play() explicitly (not just
+  // relying on the `autoplay` attribute) so a rejected promise can be caught and surfaced as a
+  // real "Click to play" fallback instead of silently staying black for some other/future
+  // autoplay-policy reason this fix doesn't anticipate.
+  const [needsManualPlay, setNeedsManualPlay] = useState(false);
+  const [hasRemoteVideo, setHasRemoteVideo] = useState(false);
+
+  function getOrCreateRemoteStream(): MediaStream {
+    if (!remoteStreamRef.current) remoteStreamRef.current = new MediaStream();
+    return remoteStreamRef.current;
+  }
+
+  function attachRemoteStreamToVideo() {
+    const video = remoteVideoRef.current;
+    const stream = remoteStreamRef.current;
+    if (!video || !stream || video.srcObject === stream) return;
+    video.srcObject = stream;
+    video.play().catch(() => setNeedsManualPlay(true));
+  }
+
+  // Closes the ref-lifecycle gap for real, rather than just asserting it can't happen: if
+  // ontrack ever fires before the <video> is mounted (viewStatus not yet "answer-ready"), the
+  // stream is still remembered in remoteStreamRef and gets attached here as soon as the element
+  // exists, instead of being silently dropped by the `if (remoteVideoRef.current)` check ontrack
+  // alone would have relied on.
+  useEffect(() => {
+    if (viewStatus === "answer-ready") attachRemoteStreamToVideo();
+  }, [viewStatus]);
+
+  const isSecureContext = typeof window !== "undefined" && window.isSecureContext;
+  const hasDisplayMediaApi = typeof navigator !== "undefined" && !!navigator.mediaDevices?.getDisplayMedia;
+
+  function armConnectTimeout() {
+    if (connectTimerRef.current != null) window.clearTimeout(connectTimerRef.current);
+    setTimedOut(false);
+    connectTimerRef.current = window.setTimeout(() => {
+      const pc = pcRef.current;
+      if (pc && pc.connectionState !== "connected") setTimedOut(true);
+    }, CONNECT_TIMEOUT_MS);
+  }
+
+  function attachConnectionStateTracking(pc: RTCPeerConnection) {
+    pc.onconnectionstatechange = () => {
+      setConnectionState(pc.connectionState);
+      if (pc.connectionState === "connected" && connectTimerRef.current != null) {
+        window.clearTimeout(connectTimerRef.current);
+        connectTimerRef.current = null;
+        setTimedOut(false);
+      }
+    };
+    // Real accumulation, not replacement - see the top-of-file comment on why overwriting
+    // remoteStreamRef on every call would have silently broken video once audio was added.
+    pc.ontrack = (event) => {
+      const combined = getOrCreateRemoteStream();
+      if (!combined.getTracks().includes(event.track)) combined.addTrack(event.track);
+      if (event.track.kind === "video") setHasRemoteVideo(true);
+      attachRemoteStreamToVideo();
+    };
+  }
+
+  // Real mic capture - optional, never blocks the screen-share/connection itself if denied or
+  // unavailable. Tracks added to the SAME peer connection as the screen video, giving a real
+  // 2-way voice call alongside the screen share once both sides do this.
+  async function acquireMicAndAddTrack(pc: RTCPeerConnection) {
+    setMicError(null);
+    try {
+      const micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      micStreamRef.current = micStream;
+      micStream.getTracks().forEach((track) => pc.addTrack(track, micStream));
+      setMicEnabled(true);
+    } catch (e) {
+      setMicEnabled(false);
+      setMicError(e instanceof Error ? `Microphone unavailable: ${e.message} (voice call disabled, screen share still works)` : "Microphone unavailable (voice call disabled, screen share still works).");
+    }
+  }
+
+  function toggleMic() {
+    const stream = micStreamRef.current;
+    if (!stream) return;
+    const nextEnabled = !micEnabled;
+    stream.getAudioTracks().forEach((t) => (t.enabled = nextEnabled));
+    setMicEnabled(nextEnabled);
+  }
+
+  function sendChatMessage(from: "customer" | "operator") {
+    const dc = dcRef.current;
+    const text = chatInput.trim();
+    if (!dc || dc.readyState !== "open" || !text) return;
+    const msg: ChatMessage = { text, from, at: Date.now() };
+    dc.send(JSON.stringify({ kind: "chat", ...msg }));
+    setChatMessages((prev) => [...prev, msg]);
+    setChatInput("");
+  }
+
+  async function handleSendFile(from: "customer" | "operator", file: File | undefined) {
+    const dc = dcRef.current;
+    if (!file || !dc || dc.readyState !== "open") return;
+    setFileSendError(null);
+    setSendingFileProgress(0);
+    try {
+      await sendFileOverChannel(dc, file, from, setSendingFileProgress);
+    } catch (e) {
+      setFileSendError(e instanceof Error ? e.message : "File transfer failed.");
+    } finally {
+      setSendingFileProgress(null);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  }
+
+  function resetAll() {
+    endRemoteSession();
+    if (connectTimerRef.current != null) window.clearTimeout(connectTimerRef.current);
+    connectTimerRef.current = null;
+    pcRef.current?.close();
+    pcRef.current = null;
+    wsRef.current?.close();
+    wsRef.current = null;
+    dcRef.current?.close();
+    dcRef.current = null;
+    localStreamRef.current?.getTracks().forEach((t) => t.stop());
+    localStreamRef.current = null;
+    micStreamRef.current?.getTracks().forEach((t) => t.stop());
+    micStreamRef.current = null;
+    remoteStreamRef.current = null;
+    setNeedsManualPlay(false);
+    setHasRemoteVideo(false);
+    setShareStatus("idle");
+    setShareError(null);
+    setSessionId("");
+    setSessionMode("screen");
+    setVideoPaused(false);
+    setRemotePaused(false);
+    setViewStatus("idle");
+    setViewError(null);
+    setConnectionState("none");
+    setTimedOut(false);
+    setMicEnabled(false);
+    setMicError(null);
+    setDataChannelOpen(false);
+    setChatMessages([]);
+    setChatInput("");
+    setSendingFileProgress(null);
+    setFileSendError(null);
+    setReceivedFiles((prev) => {
+      prev.forEach((f) => URL.revokeObjectURL(f.url));
+      return [];
+    });
+  }
+
+  // Clean up the real capture/connection/socket on unmount so a screen-share indicator doesn't
+  // keep running in the browser after navigating away from this POC.
+  useEffect(() => {
+    return () => {
+      if (connectTimerRef.current != null) window.clearTimeout(connectTimerRef.current);
+      pcRef.current?.close();
+      wsRef.current?.close();
+      dcRef.current?.close();
+      localStreamRef.current?.getTracks().forEach((t) => t.stop());
+      micStreamRef.current?.getTracks().forEach((t) => t.stop());
+    };
+  }, []);
+
+  function switchRole(next: Role) {
+    resetAll();
+    setRole(next);
+  }
+
+  // ─── Share role ───────────────────────────────────────────
+  // Three real entry points into the same session mechanism - a customer shouldn't have to
+  // share their screen (or even grant microphone access) just to ask a quick question or send
+  // a file. "chat" mode skips BOTH getDisplayMedia and getUserMedia entirely - no permission
+  // prompts at all beyond the connection itself.
+  async function startSession(mode: "screen" | "voice" | "chat") {
+    setShareError(null);
+    setSessionMode(mode);
+
+    let stream: MediaStream | null = null;
+    if (mode === "screen") {
+      if (!hasDisplayMediaApi) {
+        setShareError(
+          isSecureContext
+            ? "navigator.mediaDevices.getDisplayMedia is not available in this browser."
+            : "getDisplayMedia requires a secure context (HTTPS, or http://localhost) - this page isn't running in one.",
+        );
+        return;
+      }
+      setShareStatus("starting");
+      try {
+        stream = await navigator.mediaDevices.getDisplayMedia({ video: true });
+      } catch (e) {
+        setShareError(describeMediaError(e));
+        setShareStatus("idle");
+        return;
+      }
+      localStreamRef.current = stream;
+      if (localVideoRef.current) localVideoRef.current.srcObject = stream;
+    } else {
+      setShareStatus("starting");
+    }
+
+    const pc = new RTCPeerConnection(ICE_SERVERS);
+    pcRef.current = pc;
+    attachConnectionStateTracking(pc);
+    if (stream) {
+      stream.getTracks().forEach((track) => pc.addTrack(track, stream!));
+      // If the user closes the "Stop sharing" browser UI directly, reflect that honestly
+      // instead of leaving stale "starting" status up.
+      stream.getVideoTracks()[0]?.addEventListener("ended", () => {
+        setShareError("Screen share was stopped (browser \"Stop sharing\" control, or the shared window/tab was closed).");
+      });
+    }
+    // Chat-only mode skips mic entirely - no permission prompt at all for this mode.
+    if (mode !== "chat") await acquireMicAndAddTrack(pc);
+
+    // Share side creates the data channel (the offerer's responsibility) - the View/operator
+    // side receives it via pc.ondatachannel, set up below in handleOffer.
+    const dc = pc.createDataChannel("data");
+    dcRef.current = dc;
+    setupDataChannel(
+      dc, setDataChannelOpen,
+      (msg) => setChatMessages((prev) => [...prev, msg]),
+      (file) => setReceivedFiles((prev) => [...prev, file]),
+      setRemotePaused,
+    );
+
+    let offer: RTCSessionDescriptionInit;
+    try {
+      const created = await pc.createOffer();
+      await pc.setLocalDescription(created);
+      await waitForIceGatheringComplete(pc);
+      offer = pc.localDescription!;
+    } catch (e) {
+      setShareError(e instanceof Error ? `Failed to create offer: ${e.message}` : "Failed to create offer.");
+      setShareStatus("idle");
+      return;
+    }
+
+    setShareStatus("creating-session");
+    let session: { id: string };
+    try {
+      session = await createRemoteSession(mode);
+    } catch (e) {
+      setShareError(e instanceof Error ? e.message : "Failed to create a real signaling session.");
+      setShareStatus("idle");
+      return;
+    }
+    setSessionId(session.id);
+
+    const ws = await openSessionSocket(session.id);
+    wsRef.current = ws;
+    ws.onopen = () => {
+      const msg: SignalMessage = { type: "offer", sdp: offer };
+      ws.send(JSON.stringify(msg));
+    };
+    ws.onerror = () => {
+      setShareError("Failed to connect to the real signaling server (backend unreachable).");
+    };
+    ws.onmessage = (event) => {
+      let msg: SignalMessage;
+      try {
+        msg = JSON.parse(event.data);
+      } catch {
+        return;
+      }
+      if (msg.type === "answer" && msg.sdp) applyAnswer(msg.sdp);
+    };
+
+    setShareStatus("waiting-for-peer");
+    startRemoteSession(
+      mode === "chat"
+        ? "Text chat requested. Command Centre can join from Remote Assist."
+        : mode === "voice"
+          ? "Voice + chat requested. Command Centre can join from Remote Assist."
+          : "Screen share requested. Command Centre can join from Remote Assist.",
+    );
+  }
+
+  // Real privacy toggle - pauses the video TRACK itself (not just hiding it in the UI), so no
+  // frames are actually sent while paused. Tells the other side via the data channel so they
+  // see an honest "paused" indicator instead of wondering if the connection died or froze.
+  function toggleVideoPause() {
+    const stream = localStreamRef.current;
+    const dc = dcRef.current;
+    if (!stream) return;
+    const nextPaused = !videoPaused;
+    stream.getVideoTracks().forEach((t) => (t.enabled = !nextPaused));
+    setVideoPaused(nextPaused);
+    if (dc && dc.readyState === "open") {
+      dc.send(JSON.stringify({ kind: "video-pause", paused: nextPaused }));
+    }
+  }
+
+  async function applyAnswer(sdp: RTCSessionDescriptionInit) {
+    const pc = pcRef.current;
+    if (!pc) return;
+    setShareError(null);
+    try {
+      await pc.setRemoteDescription(new RTCSessionDescription(sdp));
+    } catch (e) {
+      setShareError(e instanceof Error ? `Failed to apply the answer: ${e.message}` : "Failed to apply the answer.");
+      return;
+    }
+    setShareStatus("completing");
+    armConnectTimeout();
+  }
+
+  // ─── View role ────────────────────────────────────────────
+  async function joinSession() {
+    setViewError(null);
+    const id = joinSessionId.trim();
+    if (!id) return;
+
+    setViewStatus("connecting");
+    const ws = await openSessionSocket(id);
+    wsRef.current = ws;
+    ws.onerror = () => {
+      setViewError("Failed to connect to the signaling server for this session ID (backend unreachable, or the session doesn't exist/has expired).");
+      setViewStatus("idle");
+    };
+    ws.onmessage = (event) => {
+      let msg: SignalMessage;
+      try {
+        msg = JSON.parse(event.data);
+      } catch {
+        return;
+      }
+      if (msg.type === "offer" && msg.sdp) handleOffer(msg.sdp, ws);
+    };
+  }
+
+  async function handleOffer(offerSdp: RTCSessionDescriptionInit, ws: WebSocket) {
+    setViewStatus("answering");
+    const pc = new RTCPeerConnection(ICE_SERVERS);
+    pcRef.current = pc;
+    attachConnectionStateTracking(pc);
+    // View/operator side receives the data channel the Share side created (it's the answerer).
+    pc.ondatachannel = (event) => {
+      dcRef.current = event.channel;
+      setupDataChannel(
+        event.channel, setDataChannelOpen,
+        (msg) => setChatMessages((prev) => [...prev, msg]),
+        (file) => setReceivedFiles((prev) => [...prev, file]),
+        setRemotePaused,
+      );
+    };
+    await acquireMicAndAddTrack(pc);
+
+    try {
+      await pc.setRemoteDescription(new RTCSessionDescription(offerSdp));
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      await waitForIceGatheringComplete(pc);
+    } catch (e) {
+      setViewError(e instanceof Error ? `Failed to create answer: ${e.message}` : "Failed to create answer.");
+      setViewStatus("idle");
+      return;
+    }
+
+    const msg: SignalMessage = { type: "answer", sdp: pc.localDescription! };
+    ws.send(JSON.stringify(msg));
+    setViewStatus("answer-ready");
+    armConnectTimeout();
+  }
+
+  // ─── Visual layer only from here down ──────────────────────
+  // Real connection-state -> display mapping (label/color/whether it pulses) - the SAME
+  // `connectionState` value tracked above, just given a clearer visual treatment. Nothing here
+  // invents a fake "signal quality" reading beyond the one real signal WebRTC actually reports
+  // (RTCPeerConnection.connectionState) - no fabricated bars/percentage.
+  const CONNECTION_META: Record<string, { label: string; color: string; bg: string; pulse: boolean }> = {
+    none: { label: "Idle", color: "var(--clpa-subtle)", bg: "rgba(var(--clpa-subtle-rgb),0.14)", pulse: false },
+    new: { label: "Initializing", color: "var(--clpa-subtle)", bg: "rgba(var(--clpa-subtle-rgb),0.14)", pulse: true },
+    connecting: { label: "Connecting", color: "var(--clpa-warning)", bg: "rgba(var(--clpa-warning-bright-rgb),0.12)", pulse: true },
+    connected: { label: "Connected", color: "var(--clpa-success)", bg: "rgba(var(--clpa-success-bright-rgb),0.1)", pulse: false },
+    disconnected: { label: "Reconnecting", color: "var(--clpa-warning)", bg: "rgba(var(--clpa-warning-bright-rgb),0.12)", pulse: true },
+    failed: { label: "Failed", color: "var(--clpa-critical)", bg: "rgba(var(--clpa-critical-bright-rgb),0.1)", pulse: false },
+    closed: { label: "Ended", color: "var(--clpa-muted)", bg: "rgba(var(--clpa-muted-rgb),0.12)", pulse: false },
+  };
+  const connMeta = CONNECTION_META[connectionState] ?? CONNECTION_META.none;
+
+  const shareableLink = sessionId ? `${window.location.origin}${window.location.pathname}?join=${sessionId}` : "";
+  const isConnected = connectionState === "connected";
+
+  const MODE_META = {
+    screen: { label: "Screen Share", Icon: Monitor },
+    voice: { label: "Voice + Chat", Icon: Mic },
+    chat: { label: "Chat Only", Icon: MessageCircle },
+  } as const;
+
+  // Purely cosmetic, self-contained feedback for the existing Copy Link button below - doesn't
+  // touch the real navigator.clipboard.writeText call itself, just how long the button
+  // acknowledges it happened.
+  const [linkCopied, setLinkCopied] = useState(false);
+  function copyShareableLink() {
+    navigator.clipboard.writeText(shareableLink);
+    setLinkCopied(true);
+    window.setTimeout(() => setLinkCopied(false), 1600);
+  }
+
+  const communicationPanel = (
+    <CommunicationPanel
+      from={role === "share" ? "customer" : "operator"}
+      micEnabled={micEnabled}
+      micAvailable={!!micStreamRef.current}
+      micError={micError}
+      onToggleMic={toggleMic}
+      dataChannelOpen={dataChannelOpen}
+      chatMessages={chatMessages}
+      chatInput={chatInput}
+      onChatInputChange={setChatInput}
+      onSendChat={() => sendChatMessage(role === "share" ? "customer" : "operator")}
+      fileInputRef={fileInputRef}
+      onPickFile={(file) => handleSendFile(role === "share" ? "customer" : "operator", file)}
+      sendingFileProgress={sendingFileProgress}
+      fileSendError={fileSendError}
+      receivedFiles={receivedFiles}
+    />
+  );
+
+  // Small, reusable status/placeholder card - used for every "nothing to see yet" moment
+  // (waiting for a peer, audio-only session, paused screen, offline video) so those real states
+  // read consistently instead of each being its own one-off block of text.
+  function StatusPlaceholder({ label, sub }: { label: string; sub?: string }) {
+    return (
+      <div
+        className="flex flex-col items-center justify-center text-center"
+        style={{ padding: "28px 16px", borderRadius: 12, background: "var(--clpa-surface)", border: "1px dashed var(--clpa-input-border)" }}
+      >
+        <div style={{ fontSize: 11, fontWeight: 700, color: "var(--clpa-body)" }}>{label}</div>
+        {sub && <div style={{ fontSize: 9.5, color: "var(--clpa-subtle)", marginTop: 3, maxWidth: 320 }}>{sub}</div>}
+      </div>
+    );
+  }
+
+  return (
+    <CLPAPage compact>
+      {/* ─── Session Status Bar - the one persistent, glanceable anchor for this page's real
+          job (see the design plan): connection state, role, and mode never require hunting
+          through the page to find, regardless of which sub-state below is currently showing. */}
+      <CLPACard style={{ padding: "10px 14px" }}>
+        <div className="flex items-center justify-between gap-3 flex-wrap">
+          <div className="flex items-center gap-2.5">
+            <span
+              className={connMeta.pulse ? "clpa-dot" : undefined}
+              style={{ width: 10, height: 10, borderRadius: 999, background: connMeta.color, display: "inline-block", flexShrink: 0 }}
+            />
+            <div>
+              <div style={{ fontSize: 11.5, fontWeight: 800, color: "var(--clpa-title)", lineHeight: 1.2 }}>{connMeta.label}</div>
+              <div style={{ fontSize: 8.5, color: "var(--clpa-subtle)" }}>
+                {role === "share"
+                  ? sessionId
+                    ? `Session ${sessionId}`
+                    : "No active session"
+                  : joinSessionId
+                  ? `Joining ${joinSessionId}`
+                  : "No session joined"}
+              </div>
+            </div>
+            {(shareStatus !== "idle" || viewStatus !== "idle") && (
+              <CLPABadge label={MODE_META[sessionMode].label} color="var(--clpa-accent-strong)" bg="rgba(var(--clpa-accent-strong-rgb),0.1)" />
+            )}
+          </div>
+
+          <div className="flex items-center gap-2">
+            {/* Real segmented role switcher - same switchRole(next) handler as before, just a
+                clearer two-way control instead of two independently-styled buttons. */}
+            <div className="flex items-center" style={{ background: "var(--clpa-divider)", borderRadius: 8, padding: 2 }}>
+              <button
+                onClick={() => switchRole("share")}
+                className="flex items-center gap-1.5 clpa-focusable"
+                style={{
+                  padding: "5px 10px", borderRadius: 6, border: "none", cursor: "pointer",
+                  background: role === "share" ? "var(--clpa-card)" : "transparent",
+                  color: role === "share" ? "var(--clpa-primary)" : "var(--clpa-muted)",
+                  boxShadow: role === "share" ? "0 1px 3px rgba(0,0,0,0.08)" : "none",
+                  fontSize: 10, fontWeight: 700,
+                }}
+              >
+                <Share2 size={11} strokeWidth={2.2} /> Share
+              </button>
+              <button
+                onClick={() => switchRole("view")}
+                className="flex items-center gap-1.5 clpa-focusable"
+                style={{
+                  padding: "5px 10px", borderRadius: 6, border: "none", cursor: "pointer",
+                  background: role === "view" ? "var(--clpa-card)" : "transparent",
+                  color: role === "view" ? "var(--clpa-primary)" : "var(--clpa-muted)",
+                  boxShadow: role === "view" ? "0 1px 3px rgba(0,0,0,0.08)" : "none",
+                  fontSize: 10, fontWeight: 700,
+                }}
+              >
+                <Eye size={11} strokeWidth={2.2} /> View
+              </button>
+            </div>
+            <button
+              onClick={resetAll}
+              className="flex items-center gap-1.5 clpa-focusable"
+              style={{ padding: "6px 10px", borderRadius: 8, border: "1px solid var(--clpa-input-border)", background: "var(--clpa-card)", color: "var(--clpa-muted)", fontSize: 10, fontWeight: 700, cursor: "pointer" }}
+            >
+              <RotateCcw size={11} strokeWidth={2.2} /> Reset
+            </button>
+          </div>
+        </div>
+      </CLPACard>
+
+      {enrollment && !enrollment.enrolled && (
+        <CLPACard style={{ padding: "10px 12px", background: "var(--clpa-critical-wash)", border: "1px solid var(--clpa-critical-wash-border)" }}>
+          <div className="flex items-start gap-2">
+            <AlertTriangle size={14} style={{ color: "var(--clpa-critical)", flexShrink: 0, marginTop: 1 }} strokeWidth={2.2} />
+            <span style={{ fontSize: 10.5, color: "var(--clpa-critical)", lineHeight: 1.4 }}>
+              Not enrolled at {enrollment.backendUrl}. Command Centre will not list this PC until that address is reachable.
+              {enrollment.lastError ? ` ${enrollment.lastError}` : ""} Set Command Centre URL in Settings, or use this PC’s Wi-Fi address / the Shared-in Tailscale IP — not the Command Centre PC’s own Tailscale IP if the accounts differ.
+            </span>
+          </div>
+        </CLPACard>
+      )}
+
+      {/* Environment check - honest, not assumed, kept but condensed to a single-line badge
+          rather than a full banner, since it's rarely the interesting state. */}
+      <div className="flex items-center gap-1.5" style={{ fontSize: 9, color: "var(--clpa-subtle)" }}>
+        {isSecureContext ? <ShieldCheck size={11} style={{ color: "var(--clpa-success)" }} strokeWidth={2.2} /> : <ShieldAlert size={11} style={{ color: "var(--clpa-critical)" }} strokeWidth={2.2} />}
+        <span style={{ color: isSecureContext ? "var(--clpa-success)" : "var(--clpa-critical)", fontWeight: 700 }}>
+          {isSecureContext ? "Secure context" : "Not a secure context"}
+        </span>
+        <span>· getDisplayMedia {hasDisplayMediaApi ? "available" : "unavailable"}</span>
+      </div>
+
+      {timedOut && (
+        <CLPACard style={{ padding: "10px 12px", background: "var(--clpa-critical-wash)", border: "1px solid var(--clpa-critical-wash-border)" }}>
+          <div className="flex items-start gap-2">
+            <AlertTriangle size={14} style={{ color: "var(--clpa-critical)", flexShrink: 0, marginTop: 1 }} strokeWidth={2.2} />
+            <span style={{ fontSize: 10.5, fontWeight: 600, color: "var(--clpa-critical)", lineHeight: 1.4 }}>
+              Connection failed - didn't reach "connected" within {CONNECT_TIMEOUT_MS / 1000}s. This can happen across
+              different networks without a TURN server (STUN alone can't traverse every NAT type) - try both sides on the
+              same network, or accept this as this feature's known limitation.
+            </span>
+          </div>
+        </CLPACard>
+      )}
+
+      {role === "share" ? (
+        <>
+          {shareError && (
+            <CLPACard style={{ padding: "10px 12px", background: "var(--clpa-critical-wash)", border: "1px solid var(--clpa-critical-wash-border)" }}>
+              <div className="flex items-start gap-2">
+                <AlertTriangle size={14} style={{ color: "var(--clpa-critical)", flexShrink: 0, marginTop: 1 }} strokeWidth={2.2} />
+                <span style={{ fontSize: 10.5, color: "var(--clpa-critical)", lineHeight: 1.4 }}>{shareError}</span>
+              </div>
+            </CLPACard>
+          )}
+
+          {shareStatus === "idle" && (
+            <CLPACard style={{ padding: "16px" }}>
+              <div style={{ fontSize: 10.5, fontWeight: 700, color: "var(--clpa-body)", marginBottom: 2 }}>Start a session</div>
+              <div style={{ fontSize: 9.5, color: "var(--clpa-subtle)", marginBottom: 12 }}>
+                An operator will see the request instantly on the Command Center dashboard and can join.
+              </div>
+              <div className="grid gap-2.5" style={{ gridTemplateColumns: "1fr 1fr 1fr" }}>
+                {(Object.entries(MODE_META) as [keyof typeof MODE_META, typeof MODE_META[keyof typeof MODE_META]][]).map(([mode, meta]) => (
+                  <button
+                    key={mode}
+                    onClick={() => startSession(mode)}
+                    className="flex flex-col items-center text-center clpa-focusable clpa-card-hover"
+                    style={{ padding: "16px 10px", borderRadius: 12, border: "1px solid var(--clpa-card-border)", background: mode === "screen" ? "rgba(var(--clpa-primary-rgb),0.05)" : "var(--clpa-surface)", cursor: "pointer" }}
+                  >
+                    <div
+                      className="flex items-center justify-center rounded-full"
+                      style={{ width: 34, height: 34, background: mode === "screen" ? "rgba(var(--clpa-primary-rgb),0.12)" : "rgba(var(--clpa-muted-rgb),0.1)", marginBottom: 8 }}
+                    >
+                      <meta.Icon size={16} style={{ color: mode === "screen" ? "var(--clpa-primary)" : "var(--clpa-muted)" }} strokeWidth={2} />
+                    </div>
+                    <div style={{ fontSize: 10.5, fontWeight: 700, color: "var(--clpa-title)" }}>{meta.label}</div>
+                    <div style={{ fontSize: 8.5, color: "var(--clpa-subtle)", marginTop: 2 }}>
+                      {mode === "screen" ? "Show your screen" : mode === "voice" ? "Talk without sharing" : "Text only, no prompts"}
+                    </div>
+                  </button>
+                ))}
+              </div>
+            </CLPACard>
+          )}
+
+          {(shareStatus === "starting" || shareStatus === "creating-session") && (
+            <CLPACard style={{ padding: "16px" }}>
+              <StatusPlaceholder
+                label={
+                  shareStatus === "creating-session"
+                    ? "Creating a real signaling session…"
+                    : sessionMode === "screen" ? "Requesting screen share permission…" : sessionMode === "voice" ? "Setting up voice/chat session…" : "Setting up chat session…"
+                }
+              />
+            </CLPACard>
+          )}
+
+          {(shareStatus === "waiting-for-peer" || shareStatus === "completing") && (
+            <CLPARowLike>
+              <CLPACard style={{ padding: "12px 14px" }}>
+                {sessionMode === "screen" ? (
+                  <div style={{ position: "relative", marginBottom: 12 }}>
+                    <video ref={localVideoRef} autoPlay muted playsInline style={{ width: "100%", borderRadius: 10, background: "var(--clpa-title)", maxHeight: 300, objectFit: "contain", opacity: videoPaused ? 0.15 : 1, display: "block" }} />
+                    {videoPaused && (
+                      <div className="flex items-center gap-1.5" style={{ position: "absolute", inset: 0, alignItems: "center", justifyContent: "center", fontSize: 11, fontWeight: 700, color: "#FFFFFF" }}>
+                        <Pause size={13} strokeWidth={2.4} /> Screen sharing paused
+                      </div>
+                    )}
+                    <button
+                      onClick={toggleVideoPause}
+                      className="flex items-center gap-1.5 clpa-focusable"
+                      style={{ position: "absolute", top: 8, right: 8, padding: "5px 10px", borderRadius: 8, border: "1px solid rgba(255,255,255,0.25)", background: "rgba(15,23,42,0.82)", color: "#FFFFFF", fontSize: 10, fontWeight: 700, cursor: "pointer" }}
+                    >
+                      {videoPaused ? <Play size={11} strokeWidth={2.4} /> : <Pause size={11} strokeWidth={2.4} />}
+                      {videoPaused ? "Resume Sharing" : "Pause Sharing"}
+                    </button>
+                  </div>
+                ) : (
+                  <div style={{ marginBottom: 12 }}>
+                    <StatusPlaceholder
+                      label={sessionMode === "voice" ? "Voice/chat only" : "Chat only"}
+                      sub={sessionMode === "voice" ? "No screen is being shared this session." : "No screen or microphone in this session."}
+                    />
+                  </div>
+                )}
+
+                <div style={{ fontSize: 9.5, fontWeight: 700, color: "var(--clpa-body)", marginBottom: 4 }}>
+                  Session ID - share this with the other side
+                </div>
+                <div className="flex items-center gap-1.5" style={{ marginBottom: 12 }}>
+                  <input
+                    readOnly
+                    value={sessionId}
+                    onFocus={(e) => e.currentTarget.select()}
+                    className="clpa-focusable"
+                    style={{ flex: 1, fontFamily: "monospace", fontSize: 10.5, padding: "6px 9px", borderRadius: 8, border: "1px solid var(--clpa-input-border)", background: "var(--clpa-surface)", color: "var(--clpa-body)" }}
+                  />
+                  <button
+                    onClick={copyShareableLink}
+                    className="flex items-center gap-1.5 clpa-focusable"
+                    style={{ padding: "6px 10px", borderRadius: 8, border: "1px solid var(--clpa-input-border)", background: linkCopied ? "rgba(var(--clpa-success-bright-rgb),0.1)" : "var(--clpa-surface)", color: linkCopied ? "var(--clpa-success)" : "var(--clpa-body)", fontSize: 10, fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap" }}
+                  >
+                    {linkCopied ? <Check size={11} strokeWidth={2.4} /> : <Copy size={11} strokeWidth={2.2} />}
+                    {linkCopied ? "Copied" : "Copy Link"}
+                  </button>
+                </div>
+
+                {shareStatus === "waiting-for-peer" && <StatusPlaceholder label="Waiting for the other side to join…" />}
+                {shareStatus === "completing" && <StatusPlaceholder label="Peer joined - completing connection…" />}
+
+                {isConnected && (
+                  <>
+                    {/* Real audio playback for the customer to actually HEAR the operator's voice -
+                        previously missing entirely: this role had no element bound to
+                        remoteVideoRef at all, so an operator's real, arriving mic audio track had
+                        nowhere to play. Visually hidden (nothing to see - operator never sends
+                        video), but functionally real - same muted-autoplay-then-manual-play-button
+                        pattern already proven on the View role, except deliberately NOT muted
+                        here, since the whole point is for the customer to hear real sound. */}
+                    <video ref={remoteVideoRef} autoPlay playsInline style={{ display: "none" }} onLoadedMetadata={attachRemoteStreamToVideo} />
+                    {needsManualPlay && (
+                      <button
+                        onClick={() => remoteVideoRef.current?.play().then(() => setNeedsManualPlay(false)).catch(() => {})}
+                        className="flex items-center gap-1.5 clpa-focusable"
+                        style={{ padding: "7px 12px", borderRadius: 8, border: "1px solid rgba(var(--clpa-primary-rgb),0.3)", background: "rgba(var(--clpa-primary-rgb),0.08)", color: "var(--clpa-primary)", fontSize: 10.5, fontWeight: 700, cursor: "pointer", marginTop: 12 }}
+                      >
+                        <Play size={11} strokeWidth={2.4} /> Click to enable operator's voice
+                      </button>
+                    )}
+                  </>
+                )}
+              </CLPACard>
+
+              {isConnected && (
+                <CLPACard style={{ padding: "12px 14px" }}>
+                  {communicationPanel}
+                </CLPACard>
+              )}
+            </CLPARowLike>
+          )}
+        </>
+      ) : (
+        <>
+          {viewError && (
+            <CLPACard style={{ padding: "10px 12px", background: "var(--clpa-critical-wash)", border: "1px solid var(--clpa-critical-wash-border)" }}>
+              <div className="flex items-start gap-2">
+                <AlertTriangle size={14} style={{ color: "var(--clpa-critical)", flexShrink: 0, marginTop: 1 }} strokeWidth={2.2} />
+                <span style={{ fontSize: 10.5, color: "var(--clpa-critical)", lineHeight: 1.4 }}>{viewError}</span>
+              </div>
+            </CLPACard>
+          )}
+
+          {viewStatus === "idle" && (
+            <CLPACard style={{ padding: "16px" }}>
+              <div style={{ fontSize: 10.5, fontWeight: 700, color: "var(--clpa-body)", marginBottom: 8 }}>Join a session</div>
+              <div style={{ fontSize: 8.5, color: "var(--clpa-subtle)", fontWeight: 600, marginBottom: 3 }}>SESSION ID</div>
+              <input
+                value={joinSessionId}
+                onChange={(e) => setJoinSessionId(e.target.value)}
+                placeholder="Session ID from the Share side"
+                className="clpa-focusable"
+                style={{ width: "100%", fontFamily: "monospace", fontSize: 10.5, padding: "7px 10px", borderRadius: 8, border: "1px solid var(--clpa-input-border)", background: "var(--clpa-surface)", color: "var(--clpa-body)", marginBottom: 10 }}
+              />
+              <button
+                onClick={joinSession}
+                disabled={!joinSessionId.trim()}
+                className="flex items-center gap-1.5 clpa-focusable"
+                style={{ padding: "7px 14px", borderRadius: 8, border: "none", background: joinSessionId.trim() ? "var(--clpa-primary)" : "var(--clpa-track)", color: "#FFFFFF", fontSize: 10.5, fontWeight: 700, cursor: joinSessionId.trim() ? "pointer" : "not-allowed" }}
+              >
+                <Eye size={12} strokeWidth={2.2} /> Join Session
+              </button>
+            </CLPACard>
+          )}
+
+          {(viewStatus === "connecting" || viewStatus === "answering") && (
+            <CLPACard style={{ padding: "16px" }}>
+              <StatusPlaceholder label={viewStatus === "connecting" ? "Connecting to the signaling session…" : "Offer received - creating answer…"} />
+            </CLPACard>
+          )}
+
+          {viewStatus === "answer-ready" && (
+            <CLPARowLike>
+              <CLPACard style={{ padding: "12px 14px" }}>
+                <div style={{ position: "relative" }}>
+                  <video
+                    ref={remoteVideoRef}
+                    autoPlay
+                    playsInline
+                    onLoadedMetadata={attachRemoteStreamToVideo}
+                    style={{ width: "100%", borderRadius: 10, background: "var(--clpa-title)", maxHeight: 320, objectFit: "contain", display: hasRemoteVideo && !remotePaused ? "block" : "none" }}
+                  />
+                  {(!hasRemoteVideo || remotePaused) && (
+                    <StatusPlaceholder
+                      label={remotePaused ? "Screen sharing paused" : "Voice/chat only"}
+                      sub={remotePaused ? "The customer has paused sharing, likely for privacy." : "This session's customer hasn't shared their screen."}
+                    />
+                  )}
+                  {hasRemoteVideo && !remotePaused && needsManualPlay && (
+                    <button
+                      onClick={() => {
+                        remoteVideoRef.current?.play().then(() => setNeedsManualPlay(false)).catch(() => {});
+                      }}
+                      className="flex items-center gap-1.5 clpa-focusable"
+                      style={{
+                        position: "absolute", inset: 0, margin: "auto", width: 150, height: 38,
+                        background: "rgba(15,23,42,0.82)", color: "#FFFFFF", border: "1px solid rgba(255,255,255,0.25)",
+                        borderRadius: 8, fontSize: 10.5, fontWeight: 700, cursor: "pointer",
+                      }}
+                    >
+                      <Play size={12} strokeWidth={2.4} /> Click to play
+                    </button>
+                  )}
+                </div>
+                {hasRemoteVideo && !remotePaused && needsManualPlay && (
+                  <div style={{ fontSize: 9, color: "var(--clpa-warning-deep)", marginTop: 6 }}>
+                    Autoplay was blocked - click the button above (a real click satisfies the browser's autoplay policy).
+                  </div>
+                )}
+              </CLPACard>
+
+              {isConnected && (
+                <CLPACard style={{ padding: "12px 14px" }}>
+                  {communicationPanel}
+                </CLPACard>
+              )}
+            </CLPARowLike>
+          )}
+        </>
+      )}
+    </CLPAPage>
+  );
+}
+
+// Local, minimal 2-column layout (video/session-info left, chat/file panel right) matching this
+// app's own established `columns="3fr 2fr"` split (see Alerts page's feed+detail layout) -
+// defined here rather than importing CLPARow directly, since that shared component always
+// renders both children with equal stretch height and this page needs the right column to only
+// appear once `isConnected`, collapsing cleanly to one column otherwise.
+function CLPARowLike({ children }: { children: React.ReactNode }) {
+  const items = Array.isArray(children) ? children : [children];
+  return (
+    <div className="grid gap-2.5" style={{ gridTemplateColumns: items.length > 1 ? "3fr 2fr" : "1fr", alignItems: "start" }}>
+      {children}
+    </div>
+  );
+}

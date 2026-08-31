@@ -1,0 +1,4 @@
+{
+  "_comment": "Copy this file to 'pulse-agent.config.json' (same folder as telemetry-server.mjs) on any laptop that needs to report to a backend OTHER than localhost:8443 - e.g. a remote laptop reaching a central server. Leave backendUrl unset (or don't create this file at all) to keep using the default localhost:8443, same as this dev machine.",
+  "backendUrl": "http://localhost:8443"
+}

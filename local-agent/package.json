@@ -1,0 +1,14 @@
+{
+  "name": "pulse-endpoint-local-agent",
+  "private": true,
+  "description": "Build-only tooling for local-agent's real installer packaging (see scripts/build-telemetry-exe.ps1) - telemetry-server.mjs itself still has zero runtime dependencies, this is not a dependency of the server at runtime.",
+  "devDependencies": {
+    "esbuild": "^0.24.0"
+  },
+  "scripts": {
+    "build:telemetry-exe": "powershell -ExecutionPolicy Bypass -File scripts/build-telemetry-exe.ps1"
+  },
+  "allowScripts": {
+    "esbuild@0.24.2": true
+  }
+}

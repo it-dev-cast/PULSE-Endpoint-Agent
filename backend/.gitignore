@@ -1,0 +1,6 @@
+.env.local
+signing-key.json
+command-center.exe
+command-center.db
+command-center.db-shm
+command-center.db-wal
