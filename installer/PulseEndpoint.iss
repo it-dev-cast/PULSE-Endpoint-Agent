@@ -458,6 +458,47 @@ begin
   end;
 end;
 
+// Real, install-time smoke test for pulse-telemetry.exe (rust-collector) - Inno's own [Files]
+// Source: already guarantees the binary is IN this installer (a missing file would have failed
+// the ISCC compile itself), but says nothing about whether it can actually RUN on this specific
+// end-user machine (AV quarantining a freshly-extracted, unsigned binary; an execution-policy/
+// AppLocker rule; a stripped Windows edition missing a WMI namespace it needs). rust-collector
+// stopped being purely additive the moment TPM device-signing (hardware-check's identity key)
+// started living inside it - a machine where it can never run needs a real, install-time failure
+// here, not the multi-year silent degrade this same binary already tolerates at runtime (see
+// telemetry-server.mjs's own execRustCollector comment).
+//
+// Retried once after a real delay rather than failing on the first miss: a freshly-extracted,
+// unsigned binary is exactly the shape of file real-time AV scanners quarantine-then-release
+// within a second or two - one retry absorbs that without masking a genuinely broken machine.
+// Output is captured via cmd.exe redirection (Inno's own Exec has no stdout-capture of its own)
+// and only checked for "looks like the real JSON payload," not deep-validated - this is a
+// liveness/executability check, not a re-implementation of what the binary itself already does.
+function SmokeTestRustCollector(): Boolean;
+var
+  ExePath, OutPath, Output, Cmd: String;
+  ResultCode: Integer;
+  Attempt: Integer;
+begin
+  ExePath := ExpandConstant('{app}') + '\local-agent\rust-collector\target\release\pulse-telemetry.exe';
+  OutPath := ExpandConstant('{tmp}') + '\rust-collector-smoketest.json';
+  Cmd := '/C ""' + ExePath + '" > "' + OutPath + '" 2>nul"';
+  Result := False;
+  for Attempt := 1 to 2 do
+  begin
+    DeleteFile(OutPath);
+    Exec('cmd.exe', Cmd, '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    if (ResultCode = 0) and FileExists(OutPath) and LoadStringFromFile(OutPath, Output) and
+       (Length(Trim(Output)) > 0) and (Copy(Trim(Output), 1, 1) = '{') then
+    begin
+      Result := True;
+      Break;
+    end;
+    if Attempt = 1 then Sleep(3000);
+  end;
+  DeleteFile(OutPath);
+end;
+
 // ONLOGON only fires at the next sign-in. Start the same tasks now so the agent is live as
 // soon as Setup finishes, not only after reboot.
 procedure StartScheduledTasks();
@@ -487,6 +528,16 @@ begin
   if CurStep = ssPostInstall then
   begin
     AppShortPath := ResolveShortAppPath();
+    // Required component, checked before anything else touches the filesystem/task scheduler -
+    // see SmokeTestRustCollector's own comment on why this can no longer be a silent best-effort
+    // dependency now that TPM device-signing lives inside it.
+    if not SmokeTestRustCollector() then
+      RaiseException(
+        'pulse-telemetry.exe (the hardware collector) could not be verified to run on this machine after 2 attempts. ' +
+        'This is a required component - Hardware Integrity scoring and TPM device-signing both depend on it. ' +
+        'Common causes: antivirus quarantining a newly-installed binary, or an execution-policy/AppLocker rule blocking it. ' +
+        'Check your antivirus quarantine/logs, allow the file, and re-run this installer.'
+      );
     // WriteEnvLocal (real backend secrets) only makes sense when the backend is actually being
     // installed on this machine - an agent-only install has no local backend to generate secrets
     // for at all.
