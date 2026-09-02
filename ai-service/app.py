@@ -43,6 +43,17 @@ SSD_WEAR_THRESHOLD = 90.0
 RISK_LOW_DAYS = 180
 RISK_MEDIUM_DAYS = 60
 
+# Real fit-quality gate, added because the model previously had no way to tell "a clean trend
+# across many real points" apart from "3 noisy points that happen to produce a slope" - both
+# looked identical (a full daysRemaining + risk projection) before this existed. Gated on BOTH R²
+# and sample size deliberately: with very few points, R² can be high by pure chance (too few
+# residual degrees of freedom for it to mean anything), so a "perfect" 3-point fit still doesn't
+# earn "high" here. 0.7 and 5 are real, defensible round numbers (0.7 is the common convention
+# for "a real linear relationship exists"; 5 is enough points for R² to have started meaning
+# something) - not tuned to produce a particular answer.
+CONFIDENCE_MIN_POINTS = 5
+CONFIDENCE_R2_THRESHOLD = 0.7
+
 
 def _day_offset(date_str: str, first_date) -> int:
     d = datetime.strptime(date_str, "%Y-%m-%d").date()
@@ -72,8 +83,9 @@ def evaluate_metric(rows, value_key: str, threshold: float, direction: str) -> d
     # Plain closed-form least squares (numpy.polyfit, degree 1) - not scikit-learn, which would
     # be a real dependency for something a single numpy call already does exactly and honestly
     # for one input variable.
-    slope, _intercept = np.polyfit(xs, ys, 1)
+    slope, intercept = np.polyfit(xs, ys, 1)
     slope = float(slope)
+    intercept = float(intercept)
 
     if abs(slope) < 1e-9:
         return {"status": "stable", "currentValue": current_value, "daysOfHistory": len(valid)}
@@ -92,12 +104,24 @@ def evaluate_metric(rows, value_key: str, threshold: float, direction: str) -> d
     else:
         risk = "High"
 
+    # Real R² over the same fit already computed above - not a new model, just a fuller read of
+    # it. ss_tot > 0 should always hold here in practice (the flat-slope check above already
+    # caught the case where y has no real variance), but the check stays as real numerical
+    # defense, not a silent assumption.
+    y_pred = slope * xs + intercept
+    ss_res = float(np.sum((ys - y_pred) ** 2))
+    ss_tot = float(np.sum((ys - np.mean(ys)) ** 2))
+    r2 = (1.0 - ss_res / ss_tot) if ss_tot > 0 else 0.0
+    confidence = "high" if (r2 >= CONFIDENCE_R2_THRESHOLD and len(valid) >= CONFIDENCE_MIN_POINTS) else "low"
+
     return {
         "status": "ok",
         "currentValue": current_value,
         "daysRemaining": days_remaining,
         "risk": risk,
         "daysOfHistory": len(valid),
+        "confidence": confidence,
+        "r2": round(r2, 2),
     }
 
 
