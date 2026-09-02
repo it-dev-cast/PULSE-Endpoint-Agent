@@ -642,6 +642,12 @@ async function loadOrRegisterDevice() {
   }
 }
 
+// Returns the parsed body (not just ok/fail) since PRD §9 Self-Healing v1 rides this same cycle
+// for its remote-dispatch poll - pendingCommand is real only when the backend actually has one
+// queued for this device (see backend/handlers.go's handleHeartbeat), null/absent otherwise, same
+// "absence, not fabricated" pattern as every other field this device reads from the backend.
+// Returns null (not a boolean) on any failure, so a caller can tell "heartbeat genuinely
+// succeeded with no pending command" apart from "the request itself failed."
 async function sendHeartbeat(credentials) {
   try {
     const controller = new AbortController();
@@ -652,12 +658,14 @@ async function sendHeartbeat(credentials) {
         headers: { Authorization: `Bearer ${credentials.apiKey}` },
         signal: controller.signal,
       });
-      return res.ok;
+      if (!res.ok) return null;
+      const body = await res.json();
+      return { ok: true, pendingCommand: body.pendingCommand ?? null };
     } finally {
       clearTimeout(timeoutId);
     }
   } catch {
-    return false;
+    return null;
   }
 }
 
@@ -1371,34 +1379,76 @@ const REMEDIATION_ACTIONS = {
 // AI Intel's Timeline/Insights, rather than a second, parallel logging system, per PRD §9's
 // "logged immutably" requirement. Every attempt is logged, whichever of the three real outcomes
 // actually happened (blocked/succeeded/failed) - never silently dropped.
+//
+// Shared by handleRemediateProxy (the local "Run Now" button, a human at this machine) and
+// runPendingCommandIfAny (a remote admin's dispatch, discovered via this device's own heartbeat
+// poll - see backend/device_commands.go) - the same policy check and REMEDIATION_ACTIONS handlers
+// either way, only the trigger's origin differs. Neither REMEDIATION_ACTIONS nor any runXxx
+// function above is touched by this - this is the one place that decides blocked/succeeded/failed
+// and logs it, already correct and unchanged.
+async function runRemediationAction(actionId) {
+  const action = REMEDIATION_ACTIONS[actionId];
+  if (!action) return { blocked: false, succeeded: false, message: "unknown action" };
+
+  const allowed = await isSelfHealingAllowed();
+  if (!allowed) {
+    const message = `${action.label} blocked - Self-Healing is not included in this tenant's current plan.`;
+    logEvent(`remediation-blocked-${actionId}`, message, "warning");
+    return { blocked: true, succeeded: false, message };
+  }
+
+  const result = await action.run();
+  const eventType = result.succeeded ? `remediation-succeeded-${actionId}` : `remediation-failed-${actionId}`;
+  logEvent(eventType, `${action.label}: ${result.detail}`, result.succeeded ? "info" : "warning");
+  return { blocked: false, succeeded: result.succeeded, message: result.detail };
+}
+
 async function handleRemediateProxy(req, res) {
   try {
     const body = JSON.parse(await readRequestBody(req));
-    const action = REMEDIATION_ACTIONS[body.action];
-    if (!action) {
+    if (!REMEDIATION_ACTIONS[body.action]) {
       res.writeHead(400);
       res.end(JSON.stringify({ error: "unknown action" }));
       return;
     }
-
-    const allowed = await isSelfHealingAllowed();
-    if (!allowed) {
-      const message = `${action.label} blocked - Self-Healing is not included in this tenant's current plan.`;
-      logEvent(`remediation-blocked-${body.action}`, message, "warning");
-      res.writeHead(403);
-      res.end(JSON.stringify({ blocked: true, succeeded: false, message }));
-      return;
-    }
-
-    const result = await action.run();
-    const eventType = result.succeeded ? `remediation-succeeded-${body.action}` : `remediation-failed-${body.action}`;
-    logEvent(eventType, `${action.label}: ${result.detail}`, result.succeeded ? "info" : "warning");
-    res.writeHead(200);
-    res.end(JSON.stringify({ blocked: false, succeeded: result.succeeded, message: result.detail }));
+    const result = await runRemediationAction(body.action);
+    res.writeHead(result.blocked ? 403 : 200);
+    res.end(JSON.stringify(result));
   } catch (err) {
     console.error("[telemetry] remediate proxy failed:", err.message);
     res.writeHead(500);
     res.end(JSON.stringify({ error: "internal error" }));
+  }
+}
+
+// PRD §9 Self-Healing v1 remote dispatch - called once per backend cycle after sendHeartbeat
+// returns a pendingCommand (see runBackendCycle below). Runs the exact same
+// runRemediationAction path the local "Run Now" button uses, then reports the real outcome back
+// so the specific command row's own status reflects it (completeDeviceCommand) - separate from,
+// and in addition to, the remediation-succeeded/failed/blocked event runRemediationAction already
+// logs unchanged.
+async function runPendingCommandIfAny(credentials, pendingCommand) {
+  if (!pendingCommand) return;
+  const result = await runRemediationAction(pendingCommand.action);
+  const status = result.blocked ? "blocked" : result.succeeded ? "succeeded" : "failed";
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), BACKEND_REQUEST_TIMEOUT_MS);
+    try {
+      await fetch(`${BACKEND_URL}/v1/devices/${credentials.id}/commands/${pendingCommand.id}/complete`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${credentials.apiKey}` },
+        body: JSON.stringify({ status, result: result.message }),
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  } catch (err) {
+    // Non-fatal: the action itself already ran and already logged its real outcome via the
+    // events table above - a failure here only means this specific command row's own status
+    // field stays stale (still "pending"), not that the remediation or its audit trail were lost.
+    console.error(`[telemetry] failed to report completion for command ${pendingCommand.id}:`, err.message);
   }
 }
 
@@ -2095,7 +2145,7 @@ async function runBackendCycle() {
     return;
   }
 
-  const [entitlement, , dbHealthy, scheduledTasks] = await Promise.all([
+  const [entitlement, heartbeat, dbHealthy, scheduledTasks] = await Promise.all([
     fetchEntitlement(deviceCredentials),
     sendHeartbeat(deviceCredentials),
     dbHealthPromise,
@@ -2104,6 +2154,19 @@ async function runBackendCycle() {
   entitlementState = entitlement;
   dbHealthyState = dbHealthy;
   scheduledTaskState = scheduledTasks;
+
+  // PRD §9 Self-Healing v1 remote dispatch - deliberately awaited here (after, not inside, the
+  // Promise.all above, so entitlement/dbHealth/scheduledTasks aren't held up by it) rather than
+  // fire-and-forget: this cycle runs on a fixed interval, and completeDeviceCommand is what
+  // actually clears "pending" - firing-and-forgetting would let the same still-pending command
+  // get picked up and run a second time next cycle if this one hadn't reported completion yet.
+  if (heartbeat?.pendingCommand) {
+    try {
+      await runPendingCommandIfAny(deviceCredentials, heartbeat.pendingCommand);
+    } catch (err) {
+      console.error("[telemetry] runPendingCommandIfAny failed:", err.message);
+    }
+  }
 
   const outcome = entitlement ? "ok" : "unavailable";
   if (outcome !== lastBackendOutcome) {

@@ -128,6 +128,29 @@ CREATE TABLE IF NOT EXISTS approval_requests (
 
 CREATE INDEX IF NOT EXISTS idx_approval_requests_device_id ON approval_requests(device_id);
 
+-- PRD §9 Self-Healing - real v1 remote dispatch for the 3 already-built remediation actions
+-- (flush-dns/clean-temp/restart-service, see telemetry-server.mjs's own PRD §9 comment). An
+-- admin enqueues one here; the device discovers it on its own next heartbeat poll (see
+-- handleHeartbeat's own comment), executes it through the exact same REMEDIATION_ACTIONS handlers
+-- the local "Run Now" button already uses, and reports the real outcome back via
+-- handleCompleteCommand - which also, unchanged, still fires the same remediation-succeeded/
+-- failed/blocked event into the hash-chained events log above, so this table is "what's the
+-- current status of this specific dispatch," not a second audit trail competing with the first.
+-- v1 deliberately allows only one pending command per device at a time (see
+-- handleEnqueueCommand's own comment) - no queue-ordering UI needed yet.
+CREATE TABLE IF NOT EXISTS device_commands (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL REFERENCES tenants(id),
+    device_id TEXT NOT NULL REFERENCES devices(id),
+    action TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('pending', 'succeeded', 'failed', 'blocked')) DEFAULT 'pending',
+    result TEXT,
+    created_at TEXT NOT NULL DEFAULT (to_char((CURRENT_TIMESTAMP AT TIME ZONE 'utc'), 'YYYY-MM-DD"T"HH24:MI:SS.MS') || 'Z'),
+    completed_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_device_commands_device_id_status ON device_commands(device_id, status);
+
 -- Real, genuine time-series for AI Intel's SSD/Battery Remaining Life predictions - distinct
 -- from `events` above (a discrete log of things that happened) and from approval_requests (a
 -- mutable current-state machine): this is a slowly-accumulating measurement history, one real

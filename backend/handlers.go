@@ -114,6 +114,15 @@ func deviceFromContext(r *http.Request) (*Device, bool) {
 	return device, ok
 }
 
+// pendingCommandInfo is the minimal shape handleHeartbeat exposes - just enough for the device
+// to know what to run (see device_commands.go's REMEDIATION_ACTIONS-key vocabulary) and which
+// command ID to report completion against. Full DeviceCommand (status/result/timestamps) has no
+// reason to round-trip back to the device that's about to determine those fields itself.
+type pendingCommandInfo struct {
+	ID     string `json:"id"`
+	Action string `json:"action"`
+}
+
 func handleHeartbeat(db *DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		device, ok := deviceFromContext(r)
@@ -128,9 +137,23 @@ func handleHeartbeat(db *DB) http.HandlerFunc {
 			writeError(w, http.StatusInternalServerError, "failed to update heartbeat")
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]string{
-			"status":     "ok",
-			"lastSeenAt": now.UTC().Format(time.RFC3339),
+
+		// Real remote-dispatch poll (PRD §9 Self-Healing v1, see device_commands.go's own
+		// comment) - riding the existing heartbeat cycle rather than a new one, since a device
+		// already checks in here every cycle regardless. A lookup failure here doesn't fail the
+		// heartbeat itself (touchDeviceLastSeen already succeeded) - the device just tries again
+		// next cycle, same as a missed poll for anything else in this system.
+		var pending *pendingCommandInfo
+		if cmd, err := getOldestPendingCommand(db, device.ID); err != nil {
+			log.Printf("heartbeat: getOldestPendingCommand failed for device %s: %v", device.ID, err)
+		} else if cmd != nil {
+			pending = &pendingCommandInfo{ID: cmd.ID, Action: cmd.Action}
+		}
+
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"status":         "ok",
+			"lastSeenAt":     now.UTC().Format(time.RFC3339),
+			"pendingCommand": pending,
 		})
 	}
 }

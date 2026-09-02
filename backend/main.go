@@ -148,6 +148,9 @@ func main() {
 			// local-agent's existing ~5s poll cadence - see live.go's own comment on why this is
 			// a separate, single-row-per-device table from the daily metric-snapshot above).
 			r.Post("/devices/{id}/live-status", handleRecordLiveStatus(db, liveHub, offlineDetector))
+			// PRD §9 Self-Healing v1 remote dispatch - a device reports the real outcome of a
+			// command it discovered via its own heartbeat poll (handleHeartbeat's pendingCommand).
+			r.Post("/devices/{id}/commands/{commandId}/complete", handleCompleteCommand(db))
 		})
 
 		// Admin-authenticated: a valid JWT from /v1/auth/login. The foundation for a future
@@ -162,6 +165,9 @@ func main() {
 			// locked baseline so the device's next hardware-check captures a fresh one.
 			r.Post("/devices/{id}/reset-fingerprint", handleResetFingerprint(db, liveHub))
 			r.Post("/devices/{id}/tags", handleSetDeviceTags(db))
+			// PRD §9 Self-Healing v1 remote dispatch - "run action X on device Y" (see
+			// device_commands.go's own comment for the one-pending-at-a-time v1 scope limit).
+			r.Post("/devices/{id}/commands", handleEnqueueCommand(db, liveHub))
 			// Fleet dashboard reads: current live telemetry per device, the tenant-wide event
 			// feed (unlike device-scoped GET /v1/devices/{id}/events above), and the real-time
 			// SSE stream both feed into for instant updates instead of a polling delay.
