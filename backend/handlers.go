@@ -633,11 +633,17 @@ func handleHardwareCheck(db *DB, hub *liveHub) http.HandlerFunc {
 			return
 		}
 
-		var current HardwareFingerprint
-		if err := json.NewDecoder(r.Body).Decode(&current); err != nil {
+		var req hardwareCheckRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid hardware fingerprint payload")
 			return
 		}
+		current := req.HardwareFingerprint
+
+		// Real, additive TPM device-identity check (see device_identity.go's own comment) - fires
+		// its own events, never changes this handler's response either way, and runs regardless
+		// of which real outcome (baseline-set/match/mismatch) the comparison below ends in.
+		verifyDeviceIdentity(db, hub, device, req, time.Now())
 
 		storedJSON, err := getDeviceFingerprint(db, device.ID)
 		if err != nil {

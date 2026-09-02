@@ -38,6 +38,24 @@ CREATE TABLE IF NOT EXISTS devices (
 
 CREATE INDEX IF NOT EXISTS idx_devices_tenant_id ON devices(tenant_id);
 
+-- Real TPM-backed device identity (PRD Section 14.1) - a real, non-exportable ECDSA P-256 key
+-- created in the device's TPM via Windows' Platform Crypto Provider (see rust-collector's
+-- tpm_identity.rs), locked here the same way hardware_fingerprint/fingerprint_locked_at above
+-- lock in a baseline: the first real publicKey a device ever sends is stored permanently, never
+-- silently overwritten by a later, different one (see handleHardwareCheck's own comment on why a
+-- changed public key is a real, flagged event, not a routine update). Deliberately independent of
+-- hardware_fingerprint's own reset lifecycle ("Reset FP") - a legitimate RAM/SSD/GPU swap doesn't
+-- change which physical TPM this machine has, so resetting the hardware baseline must not also
+-- discard a still-correct device identity. device_identity_attestation is
+-- NCRYPT_PCP_KEYATTESTATION_PROPERTY's real blob (proof the key is genuinely TPM-resident), kept
+-- for audit/future verification even though nothing parses it yet - see tpm_identity.rs's own
+-- comment on why this specific property name isn't independently confirmed. This backend runs on
+-- PostgreSQL (see db.go), which - unlike the SQLite build the comment above this table predates -
+-- supports ADD COLUMN IF NOT EXISTS natively, so no Go-side idempotent-migration helper is needed
+-- for either column.
+ALTER TABLE devices ADD COLUMN IF NOT EXISTS device_identity_public_key TEXT;
+ALTER TABLE devices ADD COLUMN IF NOT EXISTS device_identity_attestation TEXT;
+
 -- Real, durable event history (AI Intel's Timeline/Insights cards) - unlike remote_session.go's
 -- in-memory signaling sessions, this genuinely belongs in SQLite: it's meant to survive a
 -- restart and answer "what actually happened on this device," not just exist for the duration

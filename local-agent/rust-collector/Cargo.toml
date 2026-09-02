@@ -10,4 +10,7 @@ starship-battery = "0.10"
 wmi = "0.14"
 serde = { version = "1", features = ["derive"] }
 winreg = "0.52"
-windows = { version = "0.58", features = ["Win32_Foundation", "Win32_System_Memory"] }
+windows = { version = "0.58", features = ["Win32_Foundation", "Win32_System_Memory", "Win32_Security_Cryptography"] }
+# Only for encoding the signature/public-key/attestation blobs tpm_identity.rs produces as JSON
+# strings - no crypto happens in this crate, that's all real TPM/CNG work via `windows` above.
+base64 = "0.22"

@@ -125,6 +125,18 @@ let loggedScheduledTaskDiagnostics = false;
 // null = not yet determined; otherwise "ok" | "unavailable" | "invalid-json" - logged whenever
 // this changes, not just once, so a mid-run change in availability isn't silently swallowed.
 let lastRustOutcome = null;
+// Epoch ms of the start of the CURRENT continuous non-"ok" streak, or null while rust-collector
+// is fine. Distinct from lastRustOutcome's single-transition logging below: that fires once per
+// change (a real signal, but "warning"-severity and easy to scroll past in a busy fleet's event
+// window - the same class of gap the offline-detector's own one-time event had). This is what
+// RUST_DEGRADED_ESCALATION_MS checks against to fire one real "this has been broken a while,
+// pay attention" critical event instead of relying on that single warning ever being noticed.
+let rustUnavailableSinceMs = null;
+// Whether the critical escalation below has already fired for the CURRENT streak - reset on
+// recovery so a later, separate outage escalates again on its own timeline rather than staying
+// permanently silent after the first one ever fires.
+let rustDegradedEscalated = false;
+const RUST_DEGRADED_ESCALATION_MS = 5 * 60 * 1000;
 // Same transition-only pattern as lastRustOutcome, for LibreHardwareMonitor specifically -
 // loggedHwMonDiagnostics above is a one-shot "log the full field dump once" latch, not a real
 // connected/disconnected tracker, so it can't tell a mid-run LHM outage from steady-state.
@@ -1712,16 +1724,32 @@ function computeHardwareFingerprint(telemetry) {
   };
 }
 
-async function postHardwareCheck(credentials, fingerprint) {
+// fingerprintJson is the exact string signFingerprint (if it ran) hashed and signed - sent
+// alongside the flat fingerprint fields as `signedPayload` rather than relied upon to be
+// byte-reproducible from those fields again server-side (Go's json.Marshal field order and JS's
+// object-literal order happening to match today is not something to build a signature check on -
+// see the design note this was built from). The backend verifies the signature against this
+// exact string and separately checks it actually matches the top-level fields, rather than
+// re-deriving one from the other either direction.
+async function postHardwareCheck(credentials, fingerprint, fingerprintJson, identity) {
   try {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), BACKEND_REQUEST_TIMEOUT_MS);
     let body;
     try {
+      const requestBody = { ...fingerprint, signedPayload: fingerprintJson };
+      if (identity) {
+        requestBody.signature = identity.signature;
+        requestBody.signatureAlgorithm = identity.algorithm;
+        // Only present on the cycle that actually created the key - see tpm_identity.rs's own
+        // DeviceIdentity doc comment. Sent as real values only, never as empty-string filler.
+        if (identity.publicKey) requestBody.publicKey = identity.publicKey;
+        if (identity.keyAttestation) requestBody.keyAttestation = identity.keyAttestation;
+      }
       const res = await fetch(`${BACKEND_URL}/v1/devices/${credentials.id}/hardware-check`, {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${credentials.apiKey}` },
-        body: JSON.stringify(fingerprint),
+        body: JSON.stringify(requestBody),
         signal: controller.signal,
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -2105,10 +2133,15 @@ async function runBackendCycle() {
     const fingerprint = computeHardwareFingerprint(cache.data);
     if (fingerprint) {
       lastHardwareCheckAt = Date.now();
-      const result = await postHardwareCheck(deviceCredentials, fingerprint);
+      const fingerprintJson = JSON.stringify(fingerprint);
+      const identity = await signFingerprint(fingerprintJson);
+      const result = await postHardwareCheck(deviceCredentials, fingerprint, fingerprintJson, identity);
       if (result) {
         hardwareIntegrityState = result;
-        console.log(`[telemetry] hardware check: status=${result.status}${result.mismatchedFields.length ? ` fields=${result.mismatchedFields.join(", ")}` : ""}`);
+        console.log(
+          `[telemetry] hardware check: status=${result.status}${result.mismatchedFields.length ? ` fields=${result.mismatchedFields.join(", ")}` : ""}` +
+          (identity ? " (TPM-signed)" : " (unsigned - rust-collector/TPM unavailable this cycle)"),
+        );
       }
     }
   }
@@ -2228,6 +2261,54 @@ function execRustCollector() {
       resolve({ err, stdout, stderr }),
     );
   });
+}
+
+// A real TPM key operation (especially the very first Create+Finalize on a given machine) can
+// genuinely take longer than a plain collection cycle's WMI/registry round trips - generous
+// relative to that, not tight, for the same reason RUST_TIMEOUT_MS is.
+const RUST_SIGN_TIMEOUT_MS = 15000;
+
+// Separate from execRustCollector above: this mode takes real input (the fingerprint JSON to
+// sign) over stdin rather than running argument-less, so it needs its own execFile call with the
+// child's stdin actually written to and closed - execFile has no built-in "here's the input"
+// option the way its sync sibling execFileSync does.
+function execRustSignFingerprint(fingerprintJson) {
+  return new Promise((resolve) => {
+    const child = execFile(
+      RUST_BINARY,
+      ["--sign-fingerprint"],
+      { maxBuffer: 10 * 1024 * 1024, timeout: RUST_SIGN_TIMEOUT_MS },
+      (err, stdout, stderr) => resolve({ err, stdout, stderr }),
+    );
+    child.stdin.end(fingerprintJson, "utf8");
+  });
+}
+
+// Real TPM-backed signature over the exact fingerprint bytes about to be posted (see
+// tpm_identity.rs's own top comment for what this does and doesn't prove). Never fatal to the
+// hardware-check itself - a device with no working TPM, or a cycle where rust-collector is
+// unavailable (see Part 1's own escalation for that), still gets its real field-by-field tamper
+// comparison; it just posts unsigned that cycle, same graceful-degrade convention as every other
+// optional real signal in this file.
+async function signFingerprint(fingerprintJson) {
+  const { err, stdout, stderr } = await execRustSignFingerprint(fingerprintJson);
+  if (err) {
+    console.error(
+      `[telemetry] --sign-fingerprint failed to run: ${err.message}${stderr ? ` (stderr: ${stderr.toString().trim()})` : ""} - posting this hardware-check unsigned.`,
+    );
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(stdout);
+    if (typeof parsed.signature !== "string" || parsed.signature.length === 0) {
+      console.error("[telemetry] --sign-fingerprint produced no real signature - posting this hardware-check unsigned.");
+      return null;
+    }
+    return parsed;
+  } catch (e) {
+    console.error(`[telemetry] --sign-fingerprint produced unparseable output (${e.message}) - posting this hardware-check unsigned.`);
+    return null;
+  }
 }
 
 // get-telemetry.ps1's Confirm-SecureBootUEFI/Get-BitLockerVolume return "On"/"Off"/"Unknown"
@@ -2465,6 +2546,19 @@ async function collect() {
     }
   }
 
+  // Real streak tracking, separate from the transition-only logging below - a single "warning"
+  // event fired once on the way down is a real signal, but an easy one to lose in a busy fleet's
+  // event window (the same class of gap the offline-detector's own one-time event had - see
+  // deviceLiveness.js's comment on the dashboard side). rust-collector stopped being purely
+  // additive once TPM device-signing (hardware-check's identity key) started living inside it, so
+  // a machine stuck degraded for a real length of time now needs a real, hard-to-miss escalation.
+  if (rustOutcome === "ok") {
+    rustUnavailableSinceMs = null;
+    rustDegradedEscalated = false;
+  } else if (rustUnavailableSinceMs == null) {
+    rustUnavailableSinceMs = Date.now();
+  }
+
   if (rustOutcome !== lastRustOutcome) {
     // A real transition needs a genuine prior known state, not the initial null->whatever on
     // process startup - otherwise every fresh launch would log a redundant "became available"
@@ -2473,11 +2567,11 @@ async function collect() {
     const isRealTransition = lastRustOutcome != null;
     if (rustOutcome === "unavailable") {
       console.error(
-        `[telemetry] rust-collector unavailable (${rustResult.err.message}) - falling back to PowerShell-only data for the fields it would have refined (cpu/memory/secureBoot/bitlocker/tpm/gpu/network), and losing HWiNFO as a hardwareMonitor source (LibreHardwareMonitor still works independently if it's running). Storage is never sourced from it regardless (see mergeRustData's comment).`,
+        `[telemetry] rust-collector unavailable (${rustResult.err.message}) - falling back to PowerShell-only data for the fields it would have refined (cpu/memory/secureBoot/bitlocker/tpm/gpu/network), losing HWiNFO as a hardwareMonitor source (LibreHardwareMonitor still works independently if it's running), and losing TPM device-signing (hardware-check can no longer produce a signed baseline). Storage is never sourced from it regardless (see mergeRustData's comment).`,
       );
       if (rustResult.err.killed) console.error(`[telemetry]   killed: true (signal: ${rustResult.err.signal ?? "unknown"}) - likely exceeded the ${RUST_TIMEOUT_MS}ms timeout`);
       if (rustResult.stderr) console.error("[telemetry]   rust-collector stderr:", rustResult.stderr.toString());
-      if (isRealTransition) logEvent("hwinfo-unavailable", "rust-collector (HWiNFO source) became unavailable.", "warning");
+      if (isRealTransition) logEvent("hwinfo-unavailable", "rust-collector became unavailable - losing hardware refinement (cpu/memory/secureBoot/bitlocker/tpm/gpu/network), HWiNFO thermal data, and TPM device-signing.", "warning");
     } else if (rustOutcome === "invalid-json") {
       console.error(`[telemetry] rust-collector produced invalid JSON (${rustParseError.message}) - falling back to PowerShell-only data.`);
     } else {
@@ -2498,6 +2592,18 @@ async function collect() {
       if (isRealTransition && lastRustOutcome === "unavailable") logEvent("hwinfo-available", "rust-collector (HWiNFO source) became available again.", "info");
     }
     lastRustOutcome = rustOutcome;
+  }
+
+  // The hard-to-miss escalation itself - fires once per continuous streak (rustDegradedEscalated
+  // guards repeats), at "critical" severity so it can't blend into a busy fleet's warning-level
+  // noise the way the transition event above honestly can.
+  if (rustOutcome !== "ok" && !rustDegradedEscalated && rustUnavailableSinceMs != null && Date.now() - rustUnavailableSinceMs >= RUST_DEGRADED_ESCALATION_MS) {
+    rustDegradedEscalated = true;
+    logEvent(
+      "rust-collector-degraded",
+      `rust-collector has been unavailable for over ${Math.round(RUST_DEGRADED_ESCALATION_MS / 60000)} minutes - this device has been running without CPU/memory/secureBoot/bitlocker/TPM/GPU/network refinement, HWiNFO thermal data, and TPM device-signing (hardware-check baseline cannot be cryptographically signed) for that entire time.`,
+      "critical",
+    );
   }
 
   // smartctl/powercfg write [diag] lines to stderr and can leave a non-zero $LASTEXITCODE

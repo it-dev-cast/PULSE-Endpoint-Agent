@@ -1,7 +1,9 @@
 mod hwinfo;
+mod tpm_identity;
 
 use std::collections::HashMap;
-use std::process::Command;
+use std::io::Read;
+use std::process::{Command, ExitCode};
 use std::thread;
 
 use serde::Deserialize;
@@ -23,7 +25,51 @@ fn round2(value: f32) -> f64 {
     format!("{value:.2}").parse().unwrap()
 }
 
-fn main() {
+// --sign-fingerprint is a second, separate real mode alongside the normal telemetry-collection
+// run below (the default, argument-less invocation telemetry-server.mjs already calls every 5s) -
+// not a flag that changes collect()'s own behavior. telemetry-server.mjs uses this one to get the
+// exact hardware-fingerprint JSON it already built signed by this device's TPM identity key (see
+// tpm_identity.rs), reading the payload from stdin rather than argv - a fingerprint JSON is small
+// but unbounded-ish (device/RAM-module/storage counts vary), and stdin has none of a command
+// line's real length/escaping limits a temp file or argv would.
+fn main() -> ExitCode {
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("--sign-fingerprint") {
+        return run_sign_fingerprint();
+    }
+    run_collect();
+    ExitCode::SUCCESS
+}
+
+fn run_sign_fingerprint() -> ExitCode {
+    let mut payload = Vec::new();
+    if let Err(e) = std::io::stdin().read_to_end(&mut payload) {
+        eprintln!("[pulse-telemetry] --sign-fingerprint: failed to read stdin: {e}");
+        return ExitCode::FAILURE;
+    }
+    if payload.is_empty() {
+        eprintln!("[pulse-telemetry] --sign-fingerprint: stdin was empty - nothing to sign.");
+        return ExitCode::FAILURE;
+    }
+    match tpm_identity::sign_fingerprint(&payload) {
+        Ok(identity) => {
+            let out = json!({
+                "signature": identity.signature_b64,
+                "publicKey": identity.public_key_b64,
+                "keyAttestation": identity.key_attestation_b64,
+                "algorithm": "ECDSA_P256_SHA256",
+            });
+            println!("{out}");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("[pulse-telemetry] --sign-fingerprint failed: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run_collect() {
     let mut sys = System::new_all();
 
     // CPU usage is a delta since the last refresh, so reading it immediately after new_all()
