@@ -215,6 +215,10 @@ func main() {
 			// handleCreateRemoteSession), this is the admin-facing read for the initial page
 			// load and for confirming whether a session is still waiting or already connected.
 			r.Get("/tenants/{id}/remote-sessions", handleListTenantRemoteSessions(remoteSessions))
+			// PRD §30 Remote Assist hardening - real, time-limited TURN relay credentials for the
+			// dashboard operator side (see turn.go's own comment). Device-side issuance is the
+			// identical handler, registered separately below under anyDeviceAuthMiddleware.
+			r.Get("/tenants/{id}/turn-credentials", handleIssueTurnCredentials())
 			// The real, honest stand-in for an admin approval UI that doesn't exist yet - see
 			// handleApproveRequest's own comment.
 			r.Post("/approval-requests/{id}/approve", handleApproveRequest(db, signingPrivateKey, liveHub))
@@ -227,6 +231,7 @@ func main() {
 		r.Group(func(r chi.Router) {
 			r.Use(anyDeviceAuthMiddleware(db))
 			r.Post("/remote-sessions", handleCreateRemoteSession(remoteSessions, liveHub, db))
+			r.Get("/turn-credentials", handleIssueTurnCredentials())
 		})
 
 		// No auth - the session ID itself is the access control (see handleRemoteSessionWS's

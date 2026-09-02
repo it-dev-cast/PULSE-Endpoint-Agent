@@ -148,6 +148,40 @@ fn create_remote_session(mode: String) -> Result<serde_json::Value, String> {
   serde_json::from_str(&text).map_err(|e| e.to_string())
 }
 
+// PRD §30 Remote Assist hardening - real, time-limited TURN relay credentials (see
+// backend/turn.go's own comment). A plain GET with no body doesn't trigger the same CORS
+// preflight create_remote_session's own comment describes for POST, but this command exists
+// anyway for consistency within this file and because it's cheap insurance against the exact
+// class of bug that one was found live to have - untested assumptions about WebView fetch
+// behavior aren't worth carrying forward silently.
+#[tauri::command]
+fn get_turn_credentials() -> Result<serde_json::Value, String> {
+  let result = ureq::get("http://127.0.0.1:4317/api/turn-credentials")
+    .timeout(std::time::Duration::from_secs(10))
+    .call();
+  let resp = match result {
+    Ok(resp) => resp,
+    Err(_) => return Ok(serde_json::json!({ "configured": false })),
+  };
+  let text = resp.into_string().map_err(|e| e.to_string())?;
+  serde_json::from_str(&text).or_else(|_| Ok(serde_json::json!({ "configured": false })))
+}
+
+// PRD §30 Remote Assist hardening - real audit-trail events (operator joined, session ended,
+// join denied, file transferred) logged from the WebView via Rust for the same reason
+// create_remote_session already is (POST + JSON body triggers a CORS preflight the local
+// telemetry server 404s). Best-effort by design, matching every other real event-logging call in
+// this project: an audit event that fails to log doesn't undo the real thing that already
+// happened (the join/deny/transfer), so this never blocks or surfaces an error to the caller.
+#[tauri::command]
+fn log_remote_assist_event(event_type: String, message: String, severity: String) {
+  let body = serde_json::json!({ "eventType": event_type, "message": message, "severity": severity }).to_string();
+  let _ = ureq::post("http://127.0.0.1:4317/api/event")
+    .set("Content-Type", "application/json")
+    .timeout(std::time::Duration::from_secs(10))
+    .send_string(&body);
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
   tauri::Builder::default()
@@ -158,7 +192,9 @@ pub fn run() {
       update_connection_status,
       update_unread_count,
       set_tray_visible,
-      create_remote_session
+      create_remote_session,
+      get_turn_credentials,
+      log_remote_assist_event
     ])
     .setup(|app| {
       if cfg!(debug_assertions) {

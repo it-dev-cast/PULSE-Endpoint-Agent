@@ -20,11 +20,13 @@ import { useTelemetry } from "../hooks/useTelemetry";
 // same trust model a real Zoom/Meet guest-join link uses).
 //
 // STUN vs TURN: STUN (stun.l.google.com:19302, a public Google server) only helps two peers
-// discover their own public IP/port through NAT - it does NOT relay media. If both peers are
-// behind restrictive NATs that STUN can't punch through (e.g. two different corporate networks,
-// or certain symmetric-NAT home routers), the connection will genuinely fail, and no TURN
-// relay server is configured here to fall back to. That's a real, disclosed limitation of this
-// POC, not a bug - see the "Connection failed" status message below.
+// discover their own public IP/port through NAT - it does NOT relay media. PRD §30 hardening -
+// a real, self-hosted coturn instance (infra/coturn) now provides an actual TURN fallback for
+// when STUN alone can't punch through (e.g. two different corporate networks, or certain
+// symmetric-NAT home routers). TURN credentials are real and time-limited (backend/turn.go,
+// coturn's own documented REST API convention), fetched fresh per connection attempt rather than
+// hardcoded - see buildIceServers below. If TURN_SECRET/TURN_URL aren't configured on the
+// backend, this degrades to the original STUN-only behavior, not a hard failure.
 //
 // VOICE/CHAT/FILE TRANSFER: added on top of the same real RTCPeerConnection - a real
 // microphone track is added alongside the screen-video track (both sides, real 2-way audio),
@@ -45,8 +47,44 @@ import { useTelemetry } from "../hooks/useTelemetry";
 // app's existing CLPACard/CLPABadge visual language (styles/tokens.ts, components/shared/clpa.tsx)
 // instead of this page's old plain, unstyled <div> layout.
 
-const ICE_SERVERS: RTCConfiguration = { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] };
+const STUN_SERVER: RTCIceServer = { urls: "stun:stun.l.google.com:19302" };
 const CONNECT_TIMEOUT_MS = 15000;
+
+type TurnCredentialsResponse =
+  | { configured: true; urls: string[]; username: string; credential: string }
+  | { configured: false };
+
+// Real device-authenticated fetch, proxied the same way createRemoteSession below is (Tauri
+// command when packaged - a plain WebView fetch POST hits a real CORS-preflight bug there, see
+// that function's own comment; this GET likely wouldn't, but the Tauri path is kept for
+// consistency and because that assumption isn't worth re-testing live to save one code path).
+// Never throws - a fetch/parse failure degrades to STUN-only, the same honest fallback as an
+// explicit {configured: false} from the backend when TURN_SECRET/TURN_URL aren't set.
+async function fetchTurnCredentials(): Promise<TurnCredentialsResponse> {
+  try {
+    if (await isRunningInTauri()) {
+      const { invoke } = await import("@tauri-apps/api/core");
+      return await invoke<TurnCredentialsResponse>("get_turn_credentials");
+    }
+    const res = await fetch("http://127.0.0.1:4317/api/turn-credentials");
+    if (!res.ok) return { configured: false };
+    return (await res.json()) as TurnCredentialsResponse;
+  } catch {
+    return { configured: false };
+  }
+}
+
+// Called fresh for every new RTCPeerConnection (not cached at module scope) - a real, short-lived
+// credential is the point; reusing a stale one across the app's whole lifetime would defeat the
+// TTL. STUN stays in the list alongside TURN when TURN is configured, never replaced by it.
+async function buildIceServers(): Promise<{ config: RTCConfiguration; turnConfigured: boolean }> {
+  const turn = await fetchTurnCredentials();
+  const iceServers: RTCIceServer[] = [STUN_SERVER];
+  if (turn.configured) {
+    iceServers.push({ urls: turn.urls, username: turn.username, credential: turn.credential });
+  }
+  return { config: { iceServers }, turnConfigured: turn.configured };
+}
 
 // The backend speaks plain HTTP/WS, same pattern as BACKEND_URL elsewhere in this project
 // (local-agent/server/telemetry-server.mjs) - a real deployment would sit both behind a
@@ -160,7 +198,37 @@ async function openSessionSocket(sessionId: string): Promise<WebSocket> {
   return new WebSocket(`${origin}/v1/remote-sessions/${sessionId}/ws`);
 }
 
-type SignalMessage = { type: "offer" | "answer"; sdp: RTCSessionDescriptionInit };
+// PRD §30 Remote Assist hardening - join-request/join-denied are the real consent gate (see this
+// file's own top-of-section comment below): relayed through the exact same dumb WebSocket relay
+// as offer/answer already are (backend/remote_session.go needs no changes - it never parses any
+// of these, just broadcasts verbatim), so adding new kinds here doesn't touch the backend at all.
+type SignalMessage =
+  | { type: "offer"; sdp: RTCSessionDescriptionInit }
+  | { type: "answer"; sdp: RTCSessionDescriptionInit }
+  | { type: "join-request" }
+  | { type: "join-denied" };
+
+// Real, best-effort audit-trail logging (PRD §30 hardening) - Tauri command when packaged (same
+// CORS-preflight reason as create_remote_session), plain fetch proxy otherwise. Never blocks or
+// surfaces an error to the caller: an audit event failing to log doesn't undo the real join/
+// deny/transfer/end that already happened, matching useAlertEngine.ts's own postRealEvent
+// (a separate, not-imported copy - different file, same real pattern).
+async function postRealEvent(eventType: string, message: string, severity: "info" | "warning" | "critical") {
+  try {
+    if (await isRunningInTauri()) {
+      const { invoke } = await import("@tauri-apps/api/core");
+      await invoke("log_remote_assist_event", { eventType, message, severity });
+      return;
+    }
+    await fetch("http://127.0.0.1:4317/api/event", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ eventType, message, severity }),
+    });
+  } catch {
+    // Best-effort audit log - nothing more useful to do with the error here (see comment above).
+  }
+}
 
 // ─── Real chat + file transfer over a real RTCDataChannel ──
 // Ordered+reliable by default (like TCP) - relied on deliberately here: file-start (JSON) ->
@@ -175,6 +243,9 @@ const BUFFERED_AMOUNT_HIGH_WATERMARK = 1024 * 1024; // 1MB - back off sending mo
 type ChatMessage = { text: string; from: "customer" | "operator"; at: number };
 type IncomingFile = { id: string; name: string; mimeType: string; chunks: ArrayBuffer[] };
 type ReceivedFile = { name: string; mimeType: string; url: string; receivedAt: number };
+// PRD §30 Remote Assist hardening - a real transfer offer awaiting this side's explicit
+// accept/decline, shown before any bytes move (see setupDataChannel's own comment).
+type PendingFileOffer = { id: string; name: string; size: number; mimeType: string };
 
 type CommunicationPanelProps = {
   from: "customer" | "operator";
@@ -192,6 +263,10 @@ type CommunicationPanelProps = {
   sendingFileProgress: number | null;
   fileSendError: string | null;
   receivedFiles: ReceivedFile[];
+  // PRD §30 Remote Assist hardening - a real transfer offer awaiting this side's explicit
+  // accept/decline (see setupDataChannel's own comment) - null when there's nothing pending.
+  pendingFileOffer: PendingFileOffer | null;
+  onRespondToFileOffer: (accepted: boolean) => void;
 };
 
 // Declared at module scope on purpose. Defining this inside ScreenSharePOC made React treat it
@@ -213,9 +288,37 @@ function CommunicationPanel({
   sendingFileProgress,
   fileSendError,
   receivedFiles,
+  pendingFileOffer,
+  onRespondToFileOffer,
 }: CommunicationPanelProps) {
   return (
     <div className="flex flex-col" style={{ height: "100%" }}>
+      {pendingFileOffer && (
+        <div style={{ padding: "10px 11px", borderRadius: 10, border: "1px solid rgba(var(--clpa-warning-bright-rgb),0.35)", background: "rgba(var(--clpa-warning-bright-rgb),0.08)", marginBottom: 10 }}>
+          <div style={{ fontSize: 10.5, fontWeight: 800, color: "var(--clpa-title)", marginBottom: 2 }}>
+            Incoming file: {pendingFileOffer.name}
+          </div>
+          <div style={{ fontSize: 9, color: "var(--clpa-muted)", marginBottom: 8 }}>
+            {Math.round(pendingFileOffer.size / 1024)}KB - nothing transfers until you accept.
+          </div>
+          <div className="flex items-center gap-1.5">
+            <button
+              onClick={() => onRespondToFileOffer(true)}
+              className="clpa-focusable"
+              style={{ padding: "5px 11px", borderRadius: 7, border: "none", background: "var(--clpa-primary)", color: "#FFFFFF", fontSize: 10, fontWeight: 700, cursor: "pointer" }}
+            >
+              Accept
+            </button>
+            <button
+              onClick={() => onRespondToFileOffer(false)}
+              className="clpa-focusable"
+              style={{ padding: "5px 11px", borderRadius: 7, border: "1px solid var(--clpa-input-border)", background: "var(--clpa-card)", color: "var(--clpa-muted)", fontSize: 10, fontWeight: 700, cursor: "pointer" }}
+            >
+              Decline
+            </button>
+          </div>
+        </div>
+      )}
       <div className="flex items-center justify-between gap-2 flex-wrap" style={{ marginBottom: 12 }}>
         <span style={{ fontSize: 11, fontWeight: 800, color: "var(--clpa-title)", letterSpacing: 0.3 }}>SESSION CHAT</span>
         <CLPABadge
@@ -364,15 +467,31 @@ function CommunicationPanel({
   );
 }
 
+type DataChannelHandle = {
+  // Real, explicit acceptance - called from the UI once the user clicks Accept on a file-offer;
+  // arms the handler below to actually start accumulating chunks for that specific transfer id.
+  // Nothing before this call ever writes bytes for an unaccepted transfer.
+  acceptIncomingFile: (offer: PendingFileOffer) => void;
+};
+
+// PRD §30 Remote Assist hardening - file-start is now a real OFFER, not an implicit "chunks
+// incoming": the receiving side must explicitly accept (onFileOffer) before this function ever
+// starts accumulating chunks for that transfer id, and the SENDING side (sendFileOverChannel)
+// waits for that accept/decline before sending any chunk bytes at all - gating everything, not
+// just when the transfer is considered "complete." Both sides run this same handler, so it
+// reacts symmetrically: file-start means "I'm being offered a file," file-accept/file-decline
+// means "the file I sent an offer for was just answered."
 function setupDataChannel(
   dc: RTCDataChannel,
   onOpenChange: (open: boolean) => void,
   onChatMessage: (msg: ChatMessage) => void,
+  onFileOffer: (offer: PendingFileOffer) => void,
   onFileReceived: (file: ReceivedFile) => void,
+  onFileResponse: (id: string, accepted: boolean) => void,
   onVideoPauseChange?: (paused: boolean) => void,
-): void {
+): DataChannelHandle {
   dc.binaryType = "arraybuffer";
-  let incoming: IncomingFile | null = null;
+  let incoming: IncomingFile | null = null; // only set once THIS side has explicitly accepted
 
   dc.onopen = () => onOpenChange(true);
   dc.onclose = () => onOpenChange(false);
@@ -388,7 +507,9 @@ function setupDataChannel(
       if (msg.kind === "chat") {
         onChatMessage({ text: msg.text, from: msg.from, at: msg.at });
       } else if (msg.kind === "file-start") {
-        incoming = { id: msg.id, name: msg.name, mimeType: msg.mimeType, chunks: [] };
+        onFileOffer({ id: msg.id, name: msg.name, size: msg.size, mimeType: msg.mimeType });
+      } else if (msg.kind === "file-accept" || msg.kind === "file-decline") {
+        onFileResponse(msg.id, msg.kind === "file-accept");
       } else if (msg.kind === "file-end" && incoming && incoming.id === msg.id) {
         const blob = new Blob(incoming.chunks, { type: incoming.mimeType || "application/octet-stream" });
         onFileReceived({ name: incoming.name, mimeType: incoming.mimeType, url: URL.createObjectURL(blob), receivedAt: Date.now() });
@@ -404,14 +525,36 @@ function setupDataChannel(
       incoming.chunks.push(event.data as ArrayBuffer);
     }
   };
+
+  return {
+    acceptIncomingFile: (offer) => {
+      incoming = { id: offer.id, name: offer.name, mimeType: offer.mimeType, chunks: [] };
+    },
+  };
 }
 
-async function sendFileOverChannel(dc: RTCDataChannel, file: File, from: "customer" | "operator", onProgress: (pct: number) => void): Promise<void> {
+// waitForResponse resolves once the receiving side sends file-accept/file-decline for this
+// exact id (see the component's own waitForFileResponse) - or false after a real 30s timeout, so
+// an unattended/closed receiving tab doesn't hang the sender's UI forever. PRD §30 hardening:
+// no chunk bytes are sent until this resolves true - the gate covers everything, not just
+// whatever "completion" would otherwise have meant.
+async function sendFileOverChannel(
+  dc: RTCDataChannel,
+  file: File,
+  from: "customer" | "operator",
+  onProgress: (pct: number) => void,
+  waitForResponse: (id: string) => Promise<boolean>,
+): Promise<void> {
   if (file.size > MAX_FILE_SIZE) {
     throw new Error(`File too large - this session supports up to ${Math.round(MAX_FILE_SIZE / 1024 / 1024)}MB per transfer.`);
   }
   const id = `${from}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   dc.send(JSON.stringify({ kind: "file-start", id, name: file.name, size: file.size, mimeType: file.type || "application/octet-stream" }));
+
+  const accepted = await waitForResponse(id);
+  if (!accepted) {
+    throw new Error("The other side declined this file, or didn't respond in time.");
+  }
 
   const buf = await file.arrayBuffer();
   let offset = 0;
@@ -454,10 +597,15 @@ export default function ScreenSharePOC() {
   const [sessionId, setSessionId] = useState("");
   const [sessionMode, setSessionMode] = useState<"screen" | "voice" | "chat">("screen");
   const [videoPaused, setVideoPaused] = useState(false);
+  // PRD §30 Remote Assist hardening - the real join-gate: true from the moment a join-request
+  // arrives until this customer explicitly approves or denies it. Nothing (offer creation
+  // included) proceeds while this is true - see approveJoinRequest/denyJoinRequest below.
+  const [pendingJoinRequest, setPendingJoinRequest] = useState(false);
+  const [turnConfigured, setTurnConfigured] = useState<boolean | null>(null);
 
   // View role state
   const [joinSessionId, setJoinSessionId] = useState(() => new URLSearchParams(window.location.search).get("join") ?? "");
-  const [viewStatus, setViewStatus] = useState<"idle" | "connecting" | "answering" | "answer-ready">("idle");
+  const [viewStatus, setViewStatus] = useState<"idle" | "connecting" | "waiting-for-approval" | "answering" | "answer-ready">("idle");
   const [viewError, setViewError] = useState<string | null>(null);
 
   // Shared, real connection-state indicator - RTCPeerConnection.connectionState itself, not a
@@ -475,6 +623,8 @@ export default function ScreenSharePOC() {
   const [fileSendError, setFileSendError] = useState<string | null>(null);
   const [receivedFiles, setReceivedFiles] = useState<ReceivedFile[]>([]);
   const [remotePaused, setRemotePaused] = useState(false);
+  // PRD §30 Remote Assist hardening - a real file offer awaiting THIS side's accept/decline.
+  const [pendingFileOffer, setPendingFileOffer] = useState<PendingFileOffer | null>(null);
 
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
@@ -485,7 +635,16 @@ export default function ScreenSharePOC() {
   const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
   const connectTimerRef = useRef<number | null>(null);
   const dcRef = useRef<RTCDataChannel | null>(null);
+  const dataChannelHandleRef = useRef<DataChannelHandle | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  // PRD §30 Remote Assist hardening - real session-duration tracking for the "session ended"
+  // audit event: set the instant a join is actually approved (not session creation - "duration"
+  // means how long an operator was actually connected, not how long this customer sat waiting).
+  const operatorJoinedAtRef = useRef<number | null>(null);
+  // Pending file-transfer accept/decline (PRD §30 hardening) - keyed by transfer id so the
+  // sender's own sendFileOverChannel call can await the receiver's real response before sending
+  // any chunk bytes at all, not just before "completion."
+  const pendingFileResponseRef = useRef<Map<string, (accepted: boolean) => void>>(new Map());
 
   useEffect(() => {
     let cancelled = false;
@@ -508,6 +667,19 @@ export default function ScreenSharePOC() {
     return () => {
       cancelled = true;
       window.clearInterval(id);
+    };
+  }, []);
+
+  // PRD §30 Remote Assist hardening - real, one-time check (not polled - this doesn't change
+  // while the app is running) for the "· STUN only" status line below, so it reflects whether
+  // TURN is actually configured rather than a hardcoded claim either way.
+  useEffect(() => {
+    let cancelled = false;
+    fetchTurnCredentials().then((turn) => {
+      if (!cancelled) setTurnConfigured(turn.configured);
+    });
+    return () => {
+      cancelled = true;
     };
   }, []);
 
@@ -610,13 +782,45 @@ export default function ScreenSharePOC() {
     setChatInput("");
   }
 
+  // PRD §30 Remote Assist hardening - resolves the Promise sendFileOverChannel is awaiting for
+  // this exact transfer id, via whatever resolver onFileResponse (below) registered when the
+  // accept/decline actually arrived. A real 30s timeout covers the "receiving side never
+  // responds" case (closed tab, inattentive human) without hanging the sender's UI forever.
+  function waitForFileResponse(id: string): Promise<boolean> {
+    return new Promise((resolve) => {
+      const timeoutId = window.setTimeout(() => {
+        pendingFileResponseRef.current.delete(id);
+        resolve(false);
+      }, 30000);
+      pendingFileResponseRef.current.set(id, (accepted) => {
+        window.clearTimeout(timeoutId);
+        pendingFileResponseRef.current.delete(id);
+        resolve(accepted);
+      });
+    });
+  }
+
+  function handleFileResponse(id: string, accepted: boolean) {
+    pendingFileResponseRef.current.get(id)?.(accepted);
+  }
+
+  // PRD §30 Remote Assist hardening - real audit log for a completed inbound transfer (the
+  // outbound side is logged in handleSendFile above) - one log per transfer either way, always
+  // from this customer's own device (the only side with real logEvent access - see
+  // postRealEvent), regardless of which direction the file actually moved.
+  function handleFileReceived(file: ReceivedFile) {
+    setReceivedFiles((prev) => [...prev, file]);
+    postRealEvent("remote-assist-file-transferred", `File received: "${file.name}".`, "info");
+  }
+
   async function handleSendFile(from: "customer" | "operator", file: File | undefined) {
     const dc = dcRef.current;
     if (!file || !dc || dc.readyState !== "open") return;
     setFileSendError(null);
     setSendingFileProgress(0);
     try {
-      await sendFileOverChannel(dc, file, from, setSendingFileProgress);
+      await sendFileOverChannel(dc, file, from, setSendingFileProgress, waitForFileResponse);
+      postRealEvent("remote-assist-file-transferred", `File sent: "${file.name}" (${Math.round(file.size / 1024)}KB).`, "info");
     } catch (e) {
       setFileSendError(e instanceof Error ? e.message : "File transfer failed.");
     } finally {
@@ -625,7 +829,34 @@ export default function ScreenSharePOC() {
     }
   }
 
+  // PRD §30 Remote Assist hardening - the receiving side's real accept/decline action. Accept
+  // arms the data channel handle to actually start accumulating bytes for this id (see
+  // setupDataChannel's own comment) before telling the sender; decline just tells the sender,
+  // nothing to arm.
+  function respondToFileOffer(accepted: boolean) {
+    const dc = dcRef.current;
+    const offer = pendingFileOffer;
+    if (!dc || !offer) return;
+    if (accepted) dataChannelHandleRef.current?.acceptIncomingFile(offer);
+    dc.send(JSON.stringify({ kind: accepted ? "file-accept" : "file-decline", id: offer.id }));
+    setPendingFileOffer(null);
+  }
+
   function resetAll() {
+    // PRD §30 Remote Assist hardening - real "session ended" audit event with a real computed
+    // duration, measured from when an operator actually joined (operatorJoinedAtRef, set in
+    // approveJoinRequest) - not from session creation, since "duration" means how long help was
+    // actually happening, not how long this customer sat waiting. Only logged if a session
+    // genuinely had a real ID (never fires on an idle "Reset" click with nothing to end).
+    if (sessionId) {
+      const joinedAt = operatorJoinedAtRef.current;
+      const durationLabel = joinedAt != null ? `${Math.round((Date.now() - joinedAt) / 1000)}s` : "never joined";
+      postRealEvent("remote-assist-ended", `Remote assist session ended (operator connected for ${durationLabel}).`, "info");
+    }
+    operatorJoinedAtRef.current = null;
+    pendingFileResponseRef.current.clear();
+    dataChannelHandleRef.current = null;
+
     endRemoteSession();
     if (connectTimerRef.current != null) window.clearTimeout(connectTimerRef.current);
     connectTimerRef.current = null;
@@ -648,6 +879,7 @@ export default function ScreenSharePOC() {
     setSessionMode("screen");
     setVideoPaused(false);
     setRemotePaused(false);
+    setPendingJoinRequest(false);
     setViewStatus("idle");
     setViewError(null);
     setConnectionState("none");
@@ -659,6 +891,7 @@ export default function ScreenSharePOC() {
     setChatInput("");
     setSendingFileProgress(null);
     setFileSendError(null);
+    setPendingFileOffer(null);
     setReceivedFiles((prev) => {
       prev.forEach((f) => URL.revokeObjectURL(f.url));
       return [];
@@ -716,7 +949,8 @@ export default function ScreenSharePOC() {
       setShareStatus("starting");
     }
 
-    const pc = new RTCPeerConnection(ICE_SERVERS);
+    const { config } = await buildIceServers();
+    const pc = new RTCPeerConnection(config);
     pcRef.current = pc;
     attachConnectionStateTracking(pc);
     if (stream) {
@@ -734,25 +968,19 @@ export default function ScreenSharePOC() {
     // side receives it via pc.ondatachannel, set up below in handleOffer.
     const dc = pc.createDataChannel("data");
     dcRef.current = dc;
-    setupDataChannel(
+    dataChannelHandleRef.current = setupDataChannel(
       dc, setDataChannelOpen,
       (msg) => setChatMessages((prev) => [...prev, msg]),
-      (file) => setReceivedFiles((prev) => [...prev, file]),
+      setPendingFileOffer,
+      handleFileReceived,
+      handleFileResponse,
       setRemotePaused,
     );
 
-    let offer: RTCSessionDescriptionInit;
-    try {
-      const created = await pc.createOffer();
-      await pc.setLocalDescription(created);
-      await waitForIceGatheringComplete(pc);
-      offer = pc.localDescription!;
-    } catch (e) {
-      setShareError(e instanceof Error ? `Failed to create offer: ${e.message}` : "Failed to create offer.");
-      setShareStatus("idle");
-      return;
-    }
-
+    // PRD §30 Remote Assist hardening - the real consent gate: no offer is created or sent here
+    // anymore. This connects and waits; approveJoinRequest below is the only place that ever
+    // creates+sends the real SDP offer, and only once this customer has explicitly clicked
+    // Accept on a join-request. Default is deny - nothing happens until that click.
     setShareStatus("creating-session");
     let session: { id: string };
     try {
@@ -766,10 +994,6 @@ export default function ScreenSharePOC() {
 
     const ws = await openSessionSocket(session.id);
     wsRef.current = ws;
-    ws.onopen = () => {
-      const msg: SignalMessage = { type: "offer", sdp: offer };
-      ws.send(JSON.stringify(msg));
-    };
     ws.onerror = () => {
       setShareError("Failed to connect to the real signaling server (backend unreachable).");
     };
@@ -780,7 +1004,11 @@ export default function ScreenSharePOC() {
       } catch {
         return;
       }
-      if (msg.type === "answer" && msg.sdp) applyAnswer(msg.sdp);
+      if (msg.type === "join-request") {
+        setPendingJoinRequest(true);
+      } else if (msg.type === "answer" && msg.sdp) {
+        applyAnswer(msg.sdp);
+      }
     };
 
     setShareStatus("waiting-for-peer");
@@ -791,6 +1019,47 @@ export default function ScreenSharePOC() {
           ? "Voice + chat requested. Command Centre can join from Remote Assist."
           : "Screen share requested. Command Centre can join from Remote Assist.",
     );
+  }
+
+  // PRD §30 Remote Assist hardening - the real approval action: THIS is where the SDP offer is
+  // actually created and sent, for the first time, only now that a specific join-request has
+  // been explicitly accepted. Its arrival at the joining peer is the approval - no separate
+  // "approved" message is needed (see the SignalMessage type's own comment).
+  async function approveJoinRequest() {
+    const pc = pcRef.current;
+    const ws = wsRef.current;
+    setPendingJoinRequest(false);
+    if (!pc || !ws || ws.readyState !== WebSocket.OPEN) {
+      setShareError("Can't approve - the session connection is no longer open.");
+      return;
+    }
+    let offer: RTCSessionDescriptionInit;
+    try {
+      const created = await pc.createOffer();
+      await pc.setLocalDescription(created);
+      await waitForIceGatheringComplete(pc);
+      offer = pc.localDescription!;
+    } catch (e) {
+      setShareError(e instanceof Error ? `Failed to create offer: ${e.message}` : "Failed to create offer.");
+      return;
+    }
+    const msg: SignalMessage = { type: "offer", sdp: offer };
+    ws.send(JSON.stringify(msg));
+    operatorJoinedAtRef.current = Date.now();
+    postRealEvent("remote-assist-operator-joined", `An operator was approved and joined this ${MODE_META[sessionMode].label} session.`, "info");
+  }
+
+  // PRD §30 Remote Assist hardening - the real denial action: default is deny, so this is what
+  // actually happens if the customer does nothing wrong except decline - the session itself
+  // stays open (a different operator, or a retry, can still request to join).
+  function denyJoinRequest() {
+    const ws = wsRef.current;
+    setPendingJoinRequest(false);
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      const msg: SignalMessage = { type: "join-denied" };
+      ws.send(JSON.stringify(msg));
+    }
+    postRealEvent("remote-assist-join-denied", "A join request for this session was denied by the customer.", "warning");
   }
 
   // Real privacy toggle - pauses the video TRACK itself (not just hiding it in the UI), so no
@@ -831,6 +1100,15 @@ export default function ScreenSharePOC() {
     setViewStatus("connecting");
     const ws = await openSessionSocket(id);
     wsRef.current = ws;
+    // PRD §30 Remote Assist hardening - the real consent gate, joining side: send join-request
+    // the instant the socket opens, before any SDP exchange at all. Nothing else happens until
+    // either an offer arrives (the customer approved - see approveJoinRequest's own comment on
+    // why its arrival IS the approval) or an explicit join-denied does.
+    ws.onopen = () => {
+      const msg: SignalMessage = { type: "join-request" };
+      ws.send(JSON.stringify(msg));
+      setViewStatus("waiting-for-approval");
+    };
     ws.onerror = () => {
       setViewError("Failed to connect to the signaling server for this session ID (backend unreachable, or the session doesn't exist/has expired).");
       setViewStatus("idle");
@@ -842,22 +1120,31 @@ export default function ScreenSharePOC() {
       } catch {
         return;
       }
-      if (msg.type === "offer" && msg.sdp) handleOffer(msg.sdp, ws);
+      if (msg.type === "offer" && msg.sdp) {
+        handleOffer(msg.sdp, ws);
+      } else if (msg.type === "join-denied") {
+        setViewError("The customer denied this join request.");
+        setViewStatus("idle");
+        ws.close();
+      }
     };
   }
 
   async function handleOffer(offerSdp: RTCSessionDescriptionInit, ws: WebSocket) {
     setViewStatus("answering");
-    const pc = new RTCPeerConnection(ICE_SERVERS);
+    const { config } = await buildIceServers();
+    const pc = new RTCPeerConnection(config);
     pcRef.current = pc;
     attachConnectionStateTracking(pc);
     // View/operator side receives the data channel the Share side created (it's the answerer).
     pc.ondatachannel = (event) => {
       dcRef.current = event.channel;
-      setupDataChannel(
+      dataChannelHandleRef.current = setupDataChannel(
         event.channel, setDataChannelOpen,
         (msg) => setChatMessages((prev) => [...prev, msg]),
-        (file) => setReceivedFiles((prev) => [...prev, file]),
+        setPendingFileOffer,
+        handleFileReceived,
+        handleFileResponse,
         setRemotePaused,
       );
     };
@@ -932,6 +1219,8 @@ export default function ScreenSharePOC() {
       sendingFileProgress={sendingFileProgress}
       fileSendError={fileSendError}
       receivedFiles={receivedFiles}
+      pendingFileOffer={pendingFileOffer}
+      onRespondToFileOffer={respondToFileOffer}
     />
   );
 
@@ -1065,7 +1354,9 @@ export default function ScreenSharePOC() {
           </span>
         </span>
         <span>· Screen capture {hasDisplayMediaApi ? "available" : "unavailable"}</span>
-        <span>· STUN only — no TURN relay</span>
+        <span>
+          · {turnConfigured == null ? "Checking TURN relay…" : turnConfigured ? "STUN + TURN relay configured" : "STUN only — no TURN relay configured"}
+        </span>
       </div>
 
       {timedOut && (
@@ -1228,8 +1519,38 @@ export default function ScreenSharePOC() {
                   </button>
                 </div>
 
-                {shareStatus === "waiting-for-peer" && <StatusPlaceholder label="Waiting for the other side to join…" />}
-                {shareStatus === "completing" && <StatusPlaceholder label="Peer joined - completing connection…" />}
+                {pendingJoinRequest ? (
+                  <div style={{ padding: "14px 12px", borderRadius: 12, border: "1px solid rgba(var(--clpa-warning-bright-rgb),0.35)", background: "rgba(var(--clpa-warning-bright-rgb),0.08)" }}>
+                    <div className="flex items-center gap-1.5" style={{ marginBottom: 6 }}>
+                      <AlertTriangle size={13} style={{ color: "var(--clpa-warning)" }} strokeWidth={2.2} />
+                      <span style={{ fontSize: 11, fontWeight: 800, color: "var(--clpa-title)" }}>An operator wants to join</span>
+                    </div>
+                    <div style={{ fontSize: 10, color: "var(--clpa-muted)", lineHeight: 1.4, marginBottom: 10 }}>
+                      Nothing is shared until you approve. Deny keeps this session open for another attempt.
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={approveJoinRequest}
+                        className="flex items-center gap-1.5 clpa-focusable"
+                        style={{ padding: "7px 14px", borderRadius: 8, border: "none", background: "var(--clpa-primary)", color: "#FFFFFF", fontSize: 10.5, fontWeight: 700, cursor: "pointer" }}
+                      >
+                        <CheckCircle2 size={12} strokeWidth={2.2} /> Approve
+                      </button>
+                      <button
+                        onClick={denyJoinRequest}
+                        className="flex items-center gap-1.5 clpa-focusable"
+                        style={{ padding: "7px 14px", borderRadius: 8, border: "1px solid var(--clpa-input-border)", background: "var(--clpa-card)", color: "var(--clpa-muted)", fontSize: 10.5, fontWeight: 700, cursor: "pointer" }}
+                      >
+                        Deny
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <>
+                    {shareStatus === "waiting-for-peer" && <StatusPlaceholder label="Waiting for the other side to join…" />}
+                    {shareStatus === "completing" && <StatusPlaceholder label="Peer joined - completing connection…" />}
+                  </>
+                )}
 
                 {isConnected && (
                   <>
@@ -1315,9 +1636,18 @@ export default function ScreenSharePOC() {
             </div>
           )}
 
-          {(viewStatus === "connecting" || viewStatus === "answering") && (
+          {(viewStatus === "connecting" || viewStatus === "waiting-for-approval" || viewStatus === "answering") && (
             <CLPACard style={{ padding: "16px" }}>
-              <StatusPlaceholder label={viewStatus === "connecting" ? "Connecting to the signaling session…" : "Offer received - creating answer…"} />
+              <StatusPlaceholder
+                label={
+                  viewStatus === "connecting"
+                    ? "Connecting to the signaling session…"
+                    : viewStatus === "waiting-for-approval"
+                      ? "Waiting for the customer to approve this join request…"
+                      : "Offer received - creating answer…"
+                }
+                sub={viewStatus === "waiting-for-approval" ? "Nothing connects until they approve - this is the real consent gate, not a formality." : undefined}
+              />
             </CLPACard>
           )}
 

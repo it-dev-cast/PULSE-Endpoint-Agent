@@ -978,6 +978,41 @@ async function handleRemoteSessionCreate(req, res) {
   }
 }
 
+// PRD §30 Remote Assist hardening - proxies the device-authenticated GET /v1/turn-credentials so
+// the browser/webview (which never holds this device's real API key) can get real, time-limited
+// TURN relay credentials without that key ever reaching it - same device-auth-proxy pattern as
+// handleRemoteSessionCreate above. Always responds 200 with a real {configured: false} on
+// any failure (not enrolled, backend unreachable, TURN not set up) rather than an error status -
+// the client's real fallback is "use STUN only," never a hard failure.
+async function handleTurnCredentialsProxy(res) {
+  if (!deviceCredentials) {
+    res.writeHead(200);
+    res.end(JSON.stringify({ configured: false }));
+    return;
+  }
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), BACKEND_REQUEST_TIMEOUT_MS);
+  try {
+    const backendRes = await fetch(`${BACKEND_URL}/v1/turn-credentials`, {
+      headers: { Authorization: `Bearer ${deviceCredentials.apiKey}` },
+      signal: controller.signal,
+    });
+    if (!backendRes.ok) {
+      res.writeHead(200);
+      res.end(JSON.stringify({ configured: false }));
+      return;
+    }
+    res.writeHead(200);
+    res.end(await backendRes.text());
+  } catch (err) {
+    console.error("[telemetry] turn-credentials proxy failed:", err.message);
+    res.writeHead(200);
+    res.end(JSON.stringify({ configured: false }));
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
 // Real, durable event-append - POSTs to the backend using this device's own already-issued API
 // key (same convention as every other backend call in this file). Used both for transitions
 // this file detects directly (LHM/HWiNFO/backend reachability - see their own call sites below)
@@ -3070,6 +3105,11 @@ const server = createServer((req, res) => {
 
     if (req.url?.startsWith("/api/remote-session") && (req.method === "POST" || req.method === "GET")) {
       handleRemoteSessionCreate(req, res);
+      return;
+    }
+
+    if (req.url === "/api/turn-credentials" && req.method === "GET") {
+      handleTurnCredentialsProxy(res);
       return;
     }
 

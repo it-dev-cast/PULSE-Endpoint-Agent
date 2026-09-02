@@ -1,0 +1,23 @@
+# PRD §30 Remote Assist hardening - single self-hosted coturn instance. See README.md in this
+# directory for setup. TURN_SECRET must match backend/.env.local's own TURN_SECRET exactly (it's
+# the shared HMAC secret backend/turn.go uses to mint time-limited credentials - see that file's
+# own comment) - passed here via docker-compose's standard `${VAR}` substitution from a real
+# .env file next to this one (gitignored, never the same file as backend/.env.local).
+#
+# network_mode: host is coturn's own documented recommendation on native Linux (simplest correct
+# relay-candidate advertising for a wide port range) - deliberately NOT used here, since Docker
+# Desktop on Windows/Mac runs containers inside its own Linux VM, where "host" networking means
+# that VM's network namespace, not this actual Windows machine's. Explicit port publishing below
+# plus turnserver.conf's own external-ip setting is the correct approach for this platform.
+services:
+  coturn:
+    image: coturn/coturn:4.6.2
+    container_name: pulse-endpoint-coturn
+    restart: unless-stopped
+    ports:
+      - "3478:3478/udp"
+      - "3478:3478/tcp"
+      - "49160-49223:49160-49223/udp"
+    volumes:
+      - ./turnserver.conf:/etc/coturn/turnserver.conf:ro
+    command: ["-c", "/etc/coturn/turnserver.conf", "--static-auth-secret=${TURN_SECRET}"]

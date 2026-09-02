@@ -1,2 +1,3 @@
 .device-credentials.json
 .metric-snapshot-state.json
+.self-update-state.json
