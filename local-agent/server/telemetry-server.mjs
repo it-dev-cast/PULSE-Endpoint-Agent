@@ -1686,6 +1686,10 @@ async function fetchEntitlement(credentials) {
       // deviceAuthMiddleware before it ever reaches this handler. Passed through as-is, not
       // hardcoded here.
       deviceStatus: body.deviceStatus ?? null,
+      // Real, honest v1 of PRD Section 6.4's Warranty State Machine (backend's warranty.go) -
+      // "" (falsy) from the backend means no locked baseline yet to derive it from, normalized to
+      // null here so every other "not yet known" field in this object reads the same way.
+      warrantyState: body.warrantyState || null,
     };
   } catch (err) {
     console.error("[telemetry] fetchEntitlement failed:", err);

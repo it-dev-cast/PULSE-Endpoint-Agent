@@ -215,6 +215,10 @@ export type EntitlementSnapshot = {
   // This device's own real device-registry lifecycle state ("active" or "revoked", see
   // backend's schema.sql comment) - null only if the backend response predates this field.
   deviceStatus: string | null;
+  // Real, honest v1 of PRD §6.4's Warranty State Machine (backend's warranty.go) - "Active",
+  // "Warning", or "Expired" derived live from baseline-tamper/device-identity signals and real
+  // entitlement standing. null means no hardware baseline is locked yet to derive it from.
+  warrantyState: "Active" | "Warning" | "Expired" | null;
 } | null;
 
 // Real backend.compareFingerprints result (Hardware page's Tamper Detection) - updated by

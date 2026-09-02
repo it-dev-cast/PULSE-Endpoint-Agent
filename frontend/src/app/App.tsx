@@ -48,8 +48,6 @@ import {
   describeSecuritySignals,
   riskTier,
   thermalRiskFromMargin,
-  getWarrantyDaysDelta,
-  isWarrantyExpired,
   getCpuBadge,
   getMemoryBadge,
   getStorageBadge,
@@ -3629,8 +3627,7 @@ function HWDeviceOverviewCard() {
       : "Not Enrolled"
     : "Unknown";
 
-  const warrantyEndDate: string | null = null;
-  const warrantyState = getWarrantyState(warrantyEndDate);
+  const warrantyState = connected ? data?.entitlement?.warrantyState ?? null : null;
 
   // Real age since BIOS release (bios.ReleaseDate) - see formatDeviceAge's own comment for why
   // this is a defensible real proxy, not literal manufacture/purchase date (which this project
@@ -3657,7 +3654,7 @@ function HWDeviceOverviewCard() {
     { label: "Age", value: deviceAge ?? "—", sample: deviceAge == null },
     {
       label: "Warranty",
-      value: warrantyState && warrantyEndDate ? `${warrantyState} · ${formatWarrantyDate(warrantyEndDate)}` : "Unknown",
+      value: warrantyState ? WARRANTY_STATE_META[warrantyState].label : "Unknown",
       valueColor: warrantyState ? WARRANTY_STATE_META[warrantyState].color : "var(--clpa-muted)",
       sample: warrantyState == null,
     },
@@ -4619,35 +4616,21 @@ function WRingGauge({ pct, color, track, center }: { pct: number; color: string;
 // Matches the PRD's vocabulary exactly.
 type WarrantyState = "Active" | "Warning" | "UnderReview" | "Voided" | "Expired";
 
-// Coverage dates are not live: Dell, HP, and Lenovo each need their own warranty API, and
-// none is connected. Serial/manufacturer/model come from standard WMI on every brand.
-function formatWarrantyDate(isoDate: string): string {
-  return formatDateLabel(new Date(`${isoDate}T00:00:00`));
-}
-
-// Computes WarrantyState for real - the only logic that runs is a plain calendar comparison
-// (today vs. the real end date), with no external dependency.
+// Real, honest v1 (backend's warranty.go) as of this session: this app no longer computes
+// WarrantyState itself from a (permanently null - no Dell/HP/Lenovo OEM API was ever wired)
+// coverage date. It reads the real, live-derived state telemetry-server.mjs's fetchEntitlement
+// merges into data.entitlement.warrantyState (backend/handlers.go's handleGetEntitlement) -
+// baseline-intact + real subscription standing for Active, an unresolved
+// hardware-tamper-detected/device-identity-invalid event for Warning, a lapsed subscription for
+// Expired. null means not enough real data yet (no locked baseline), same honesty rule as
+// everywhere else in this app - never a fabricated default.
 //
-// "Warning", "UnderReview", and "Voided" are defined in the type above but structurally
-// UNREACHABLE from this function, on purpose. Per the PRD, those three states are driven by a
-// hardware-tamper-detection + ADE-verification workflow: §6.1's signed baseline hardware
-// fingerprint, §6.2's continuous hardware validation (re-scanning every 30 min and on wake,
-// generating a "tamper incident" on any deviation from that baseline), and §6.3's
-// authorization-token database adjudicated by a "Command Center" backend - none of which exists
-// anywhere in this project. There is no real signal available here that could honestly mean "a
-// tamper incident was raised and is pending review" or "this warranty was voided due to an
-// unauthorized hardware change." Rather than invent a fake trigger for them (e.g. wiring them to
-// some unrelated telemetry field), this function simply cannot produce them - the type stays
-// complete so a real future implementation of §6.1-6.3 has a defined state to plug into, but
-// today's logic covers only the two states honestly derivable from a real date comparison.
-// Computes WarrantyState when a real OEM end date exists. Null end date → unknown (no Dell/HP/
-// Lenovo warranty API is wired), never a borrowed date from another machine.
-function getWarrantyState(endDateIso: string | null | undefined): WarrantyState | null {
-  if (!endDateIso) return null;
-  return isWarrantyExpired(endDateIso) ? "Expired" : "Active";
-}
+// "UnderReview" and "Voided" remain structurally UNREACHABLE, on purpose - both require a real,
+// human-confirmed adjudication step (PRD's "formal ADE verification") that doesn't exist
+// anywhere in this project yet (see backend/warranty.go's own comment). The type stays complete
+// so a real future implementation of that workflow has a defined state to plug into.
 
-// Complete mapping for all 5 PRD states, even though only Active/Expired are reachable today -
+// Complete mapping for all 5 PRD states, even though only Active/Warning/Expired are reachable today -
 // Warning/UnderReview/Voided get real, considered colors now so a future real implementation of
 // PRD §6.1-6.3 doesn't also need to design this part.
 const WARRANTY_STATE_META: Record<WarrantyState, { label: string; color: string; bg: string; track: string }> = {
@@ -4673,54 +4656,53 @@ function WSStatusRow() {
 }
 
 // KPI 1: Warranty only — status + countdown + action
+//
+// Real state (backend's warranty.go: baseline intact + real entitlement standing, or an
+// unresolved tamper/identity signal) as of this session - OEM coverage dates are still not
+// sourced from anywhere (no Dell/HP/Lenovo API wired, unchanged from before), so this card shows
+// the real state without a fabricated expiry countdown.
 function WWarrantyStatusCard() {
-  const warrantyEndDate: string | null = null;
-  const warrantyStartDate: string | null = null;
-  const warrantyState = getWarrantyState(warrantyEndDate);
-  const known = warrantyState != null && warrantyEndDate != null && warrantyStartDate != null;
+  const { data, connected } = useTelemetry();
+  const warrantyState = connected ? data?.entitlement?.warrantyState ?? null : null;
+  const known = warrantyState != null;
   const meta = known ? WARRANTY_STATE_META[warrantyState] : { label: "Unknown", color: "var(--clpa-muted)", bg: "rgba(var(--clpa-subtle-rgb),0.1)", track: "var(--clpa-divider)" };
-  const isExpired = warrantyState === "Expired";
-  const daysDelta = known ? getWarrantyDaysDelta(warrantyEndDate) : null;
-  const startMs = known ? new Date(`${warrantyStartDate}T00:00:00`).getTime() : null;
-  const endMs = known ? new Date(`${warrantyEndDate}T00:00:00`).getTime() : null;
-  const pctRemaining =
-    known && startMs != null && endMs != null && endMs > startMs
-      ? Math.max(0, Math.min(100, Math.round(((endMs - Date.now()) / (endMs - startMs)) * 100)))
-      : 0;
+  const needsAttention = known && warrantyState !== "Active";
 
   return (
     <WCard style={{ padding: "12px 14px", display: "flex", flexDirection: "column" }}>
       <WHead title="Warranty Status" badge={meta.label} badgeColor={meta.color} badgeBg={meta.bg} badgeSample={!known} />
 
       <div className="flex items-center gap-3 flex-1">
-        <WRingGauge pct={pctRemaining} color={meta.color} track={meta.track} center={<Shield size={22} color={meta.color} strokeWidth={2} />} />
+        <WRingGauge pct={known ? 100 : 0} color={meta.color} track={meta.track} center={<Shield size={22} color={meta.color} strokeWidth={2} />} />
         <div className="min-w-0">
-          <div style={{ fontSize: 14, fontWeight: 800, color: meta.color }}>{known ? (isExpired ? "Expired" : "Valid") : "Unknown"}</div>
+          <div style={{ fontSize: 14, fontWeight: 800, color: meta.color }}>{known ? meta.label : "Unknown"}</div>
           <div style={{ fontSize: 9, color: "var(--clpa-muted)", marginTop: 2 }}>
-            {known && daysDelta != null ? `${daysDelta} days ${isExpired ? "ago" : "remaining"}` : "OEM warranty not connected"}
+            {known ? "Baseline + subscription standing" : "No hardware baseline locked yet"}
           </div>
-          <div style={{ fontSize: 16, fontWeight: 900, color: "var(--clpa-title)", marginTop: 8, lineHeight: 1 }}>{known ? formatWarrantyDate(warrantyEndDate) : "—"}</div>
-          <div style={{ fontSize: 8.5, color: "var(--clpa-subtle)", marginTop: 2 }}>Expiry date</div>
+          <div style={{ fontSize: 16, fontWeight: 900, color: "var(--clpa-title)", marginTop: 8, lineHeight: 1 }}>—</div>
+          <div style={{ fontSize: 8.5, color: "var(--clpa-subtle)", marginTop: 2 }}>Expiry date (OEM lookup not connected)</div>
         </div>
       </div>
 
-      {known ? (
+      {needsAttention ? (
         <div className="rounded-lg mt-3" style={{ background: "rgba(var(--clpa-warning-bright-rgb),0.08)", border: "1px solid rgba(var(--clpa-warning-bright-rgb),0.28)", padding: "8px 9px" }}>
           <div className="flex items-center gap-1.5 mb-1.5">
             <AlertTriangle size={12} color="var(--clpa-warning)" strokeWidth={2.2} />
-            <span style={{ fontSize: 9, fontWeight: 700, color: "var(--clpa-warning-deep)" }}>{isExpired ? "Expired" : "Renewal window"}</span>
+            <span style={{ fontSize: 9, fontWeight: 700, color: "var(--clpa-warning-deep)" }}>{warrantyState}</span>
           </div>
           <div style={{ fontSize: 8.5, color: "var(--clpa-muted)", lineHeight: 1.35 }}>
-            {isExpired
-              ? `Expired ${daysDelta} days ago. OEM warranty lookup is not connected, so extend/renew cannot be requested from this agent.`
-              : `Expires in ${daysDelta} days. OEM warranty lookup is not connected, so extend/renew cannot be requested from this agent.`}
+            {warrantyState === "Warning"
+              ? "An unresolved hardware-tamper or device-identity signature issue was detected on this device."
+              : "This tenant's subscription has expired or is suspended."}
           </div>
         </div>
       ) : (
         <div className="rounded-lg mt-3" style={{ background: "var(--clpa-surface)", border: "1px solid var(--clpa-surface-border)", padding: "8px 9px" }}>
-          <div style={{ fontSize: 9, fontWeight: 700, color: "var(--clpa-body)", marginBottom: 4 }}>OEM warranty not connected</div>
+          <div style={{ fontSize: 9, fontWeight: 700, color: "var(--clpa-body)", marginBottom: 4 }}>{known ? "No action needed" : "Not synced"}</div>
           <div style={{ fontSize: 8.5, color: "var(--clpa-muted)", lineHeight: 1.35 }}>
-            Dell, HP, and Lenovo coverage lookup is not wired. Serial and manufacturer on this page are from this PC.
+            {known
+              ? "Hardware baseline is intact and the subscription is in good standing."
+              : "Dell, HP, and Lenovo coverage lookup is not wired. Serial and manufacturer on this page are from this PC."}
           </div>
         </div>
       )}
@@ -4730,9 +4712,8 @@ function WWarrantyStatusCard() {
 
 // Real entitlement facts (backend/'s Cloud Command Center, PRD §7/§13) - fetched by
 // local-agent/server/telemetry-server.mjs on its own slower interval and merged into
-// data.entitlement. Unlike formatWarrantyDate above (which takes a plain YYYY-MM-DD date),
-// backend/ returns a full ISO datetime (e.g. "2027-07-27T04:59:00.312Z"), so this is its own
-// formatter rather than a shared one that would double-append a time component.
+// data.entitlement. backend/ returns a full ISO datetime (e.g. "2027-07-27T04:59:00.312Z"), so
+// this is its own formatter rather than reusing a plain-date one that would misparse it.
 function formatEntitlementDate(iso: string): string {
   return formatDateLabel(new Date(iso));
 }
@@ -4824,8 +4805,7 @@ function WSubscriptionStatusCard() {
 function WCoverageCard() {
   const { data, connected } = useTelemetry();
   const entitlementReal = connected && data?.entitlement != null;
-  const warrantyEndDate: string | null = null;
-  const warrantyState = getWarrantyState(warrantyEndDate);
+  const warrantyState = connected ? data?.entitlement?.warrantyState ?? null : null;
   const warrantyOk = warrantyState === "Active";
   const warrantyKnown = warrantyState != null;
   const items = [

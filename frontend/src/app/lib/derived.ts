@@ -149,36 +149,6 @@ export function describeSecuritySignals(data: Snapshot, connected: boolean): str
   return parts.length > 0 ? parts.join(" · ") : "No security sensors";
 }
 
-// ─── Warranty coverage ────────────────────────────────────
-// OEM warranty start/end/plan is not collected: Dell, HP, and Lenovo each use a different
-// lookup (service-tag / serial APIs), and none of those are wired. Identity (serial,
-// manufacturer, model) comes from standard Win32_* WMI and works on every brand. Coverage
-// dates stay null so a Lenovo/HP device cannot inherit this build PC's Dell ProSupport window.
-export function getWarrantyDaysUntilExpiry(endDateIso: string): number {
-  const today = new Date();
-  const end = new Date(`${endDateIso}T00:00:00`);
-  const msPerDay = 1000 * 60 * 60 * 24;
-  return Math.round((end.getTime() - today.getTime()) / msPerDay);
-}
-
-export function getWarrantyDaysDelta(endDateIso: string): number {
-  return Math.abs(getWarrantyDaysUntilExpiry(endDateIso));
-}
-
-export function getWarrantyPeriodLabel(startDateIso: string, endDateIso: string): string {
-  const start = new Date(`${startDateIso}T00:00:00`);
-  const end = new Date(`${endDateIso}T00:00:00`);
-  const msPerDay = 1000 * 60 * 60 * 24;
-  const days = Math.round((end.getTime() - start.getTime()) / msPerDay);
-  const years = Math.round(days / 365.25);
-  return `${years} Year${years === 1 ? "" : "s"}`;
-}
-
-export function isWarrantyExpired(endDateIso: string): boolean {
-  const today = new Date();
-  const end = new Date(`${endDateIso}T00:00:00`);
-  return today >= end;
-}
 
 // ─── Risk tiers ───────────────────────────────────────────
 // Simple, disclosed risk tiers applied to every real risk percentage across the AI Intel page:

@@ -153,6 +153,10 @@ type entitlementResponse struct {
 	// still real data, not hardcoded, and correctly reflects the one lifecycle state that can
 	// exist for a device that got this far.
 	DeviceStatus string `json:"deviceStatus"`
+	// WarrantyState is PRD Section 6.4's real, honest v1 (see warranty.go's own comment for
+	// exactly which of the five PRD states this can and can't be) - "" when there isn't yet a
+	// locked baseline to derive it from, never a fabricated default.
+	WarrantyState string `json:"warrantyState"`
 }
 
 func handleGetEntitlement(db *DB) http.HandlerFunc {
@@ -209,11 +213,19 @@ func handleGetEntitlement(db *DB) http.HandlerFunc {
 			return
 		}
 
+		warrantyState, err := computeDeviceWarrantyState(db, device, entitlement.Status)
+		if err != nil {
+			log.Printf("entitlement: computeDeviceWarrantyState failed for %s: %v", device.ID, err)
+			writeError(w, http.StatusInternalServerError, "internal error")
+			return
+		}
+
 		writeJSON(w, http.StatusOK, entitlementResponse{
-			Entitlement:  *entitlement,
-			DeviceCount:  deviceCount,
-			Features:     features,
-			DeviceStatus: device.Status,
+			Entitlement:   *entitlement,
+			DeviceCount:   deviceCount,
+			Features:      features,
+			DeviceStatus:  device.Status,
+			WarrantyState: warrantyState,
 		})
 	}
 }
