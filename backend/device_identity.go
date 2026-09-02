@@ -143,7 +143,7 @@ func verifyDeviceIdentity(db *DB, hub *liveHub, device *Device, req hardwareChec
 		} else if !locked {
 			if stored, err := getDeviceIdentityPublicKey(db, device.ID); err == nil && stored != nil && *stored != req.PublicKey {
 				fireDeviceIdentityEvent(db, hub, device, now, fmt.Sprintf(
-					"Device %s (%s) presented a NEW TPM device-identity public key that differs from its stored one - possibly a genuine motherboard replacement (a real new physical TPM), or a cloned/spoofed identity. The stored key was NOT replaced automatically.",
+					"Device %s (%s) presented a NEW TPM device-identity public key that differs from its stored one. This key is scoped to the Windows user account that created it, not machine-wide (see tpm_identity.rs's own comment on why) - so the most likely benign cause is a different Windows user account creating it for the first time on this same machine (e.g. after a re-image, or a new admin account), which wouldn't find the original account's key locally and would mint a new one. A genuine new physical TPM (motherboard replacement) or a cloned/spoofed identity remain real possibilities too. The stored key was NOT replaced automatically.",
 					device.Hostname, device.ID,
 				))
 			}

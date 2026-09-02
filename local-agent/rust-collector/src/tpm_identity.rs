@@ -49,11 +49,31 @@ const BLOB_TYPE_ECC_PUBLIC: &str = "ECCPUBLICBLOB";
 const KEY_ATTESTATION_PROPERTY: &str = "PCP_KEYATTESTATION";
 const SHA256_ALGORITHM: &str = "SHA256";
 
-// NCRYPT_MACHINE_KEY_FLAG (0x20): this is a DEVICE identity, not tied to whichever Windows user
-// happens to be signed in when the ONLOGON-triggered scheduled task runs it.
-// NCRYPT_SILENT_FLAG (0x40): guarantees no UI prompt ever appears - this runs in a hidden
+// NCRYPT_MACHINE_KEY_FLAG was tried first (the intent was a DEVICE identity, not tied to
+// whichever Windows user happens to be signed in) but real, live testing on this project's own
+// dev machine (fully elevated, confirmed via UAC) proved that combination doesn't work:
+// NCryptCreatePersistedKey returns NTE_PERM (0x80090010) for MS_PLATFORM_CRYPTO_PROVIDER +
+// NCRYPT_MACHINE_KEY_FLAG regardless of admin rights - matching a real, documented Microsoft
+// Q&A report of the identical failure signature, and matching the fact that Google's own
+// go-attestation (attest/pcp_windows.go's NewAK, the same real reference implementation cited
+// at this file's own top comment as validating the PCP approach) never sets this flag either -
+// it creates its PCP keys with dwFlags = 0.
+//
+// So this key is genuinely USER-scoped, not machine-scoped - a real, disclosed tradeoff, not a
+// silently accepted downgrade. Under this project's current deployment model (the
+// ONLOGON-triggered scheduled task always runs as the one specific admin account that ran the
+// installer - see PulseEndpoint.iss's own schtasks /Create, no /RU override), this is
+// functionally equivalent to a device identity in practice: the same Windows account is the only
+// one that will ever create or reopen this key on a given machine. It would only genuinely
+// diverge if a second Windows account ever ran this task on the same physical machine (e.g. a
+// re-image with a differently-named admin account) - open_or_create_key wouldn't find that first
+// account's key and would mint a new one under the second account instead, which backend/'s
+// device_identity.go now specifically calls out as the likely explanation when this happens (see
+// its own comment on the "differs from stored" branch).
+//
+// NCRYPT_SILENT_FLAG (0x40) is kept: guarantees no UI prompt ever appears - this runs in a hidden
 // scheduled task with no interactive session to show one to; a prompt here would hang forever.
-const KEY_FLAGS: u32 = 0x20 | 0x40;
+const KEY_FLAGS: u32 = 0x40;
 
 // Real CNG ECC public-key blob header magic for a P-256 public key (BCRYPT_ECCKEY_BLOB.dwMagic) -
 // stable since Windows 7's original CNG ECC support, unchanged since. Confirmed directly against
@@ -105,7 +125,8 @@ fn sha256(data: &[u8]) -> Result<[u8; 32], String> {
 }
 
 /// Opens the persisted device-identity key if it already exists, else creates it (non-exportable
-/// ECDSA P-256, machine-scoped). Real idempotent get-or-create - never NCRYPT_OVERWRITE_KEY_FLAG,
+/// ECDSA P-256, user-scoped - see KEY_FLAGS's own comment on why). Real idempotent get-or-create -
+/// never NCRYPT_OVERWRITE_KEY_FLAG,
 /// since silently replacing an existing device identity key would rotate it without anyone
 /// deciding to (the one deliberate way to do that is the existing "Reset FP" flow, which this
 /// module does not touch).
