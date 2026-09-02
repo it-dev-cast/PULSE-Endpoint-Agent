@@ -2,11 +2,12 @@ import { useEffect, useRef, useState, type RefObject } from "react";
 import {
   Monitor, Mic, MicOff, MessageCircle, Send, Paperclip, Play, Pause,
   Copy, Check, RotateCcw, AlertTriangle, Download, ShieldCheck, ShieldAlert,
-  Share2, Eye,
+  Share2, Eye, Headphones, Wifi, CheckCircle2, Clock,
 } from "lucide-react";
 import { useApp } from "../context/AppContext";
 import { CLPAPage, CLPACard, CLPABadge } from "../components/shared/clpa";
 import { isRunningInTauri } from "../lib/tauriRuntime";
+import { useTelemetry } from "../hooks/useTelemetry";
 
 // ─── Real WebRTC screen-share proof of concept ─────────────
 // Genuinely connects two browser tabs peer-to-peer and streams a real captured screen between
@@ -215,6 +216,14 @@ function CommunicationPanel({
 }: CommunicationPanelProps) {
   return (
     <div className="flex flex-col" style={{ height: "100%" }}>
+      <div className="flex items-center justify-between gap-2 flex-wrap" style={{ marginBottom: 12 }}>
+        <span style={{ fontSize: 11, fontWeight: 800, color: "var(--clpa-title)", letterSpacing: 0.3 }}>SESSION CHAT</span>
+        <CLPABadge
+          label={dataChannelOpen ? "Channel open" : "Connecting…"}
+          color={dataChannelOpen ? "var(--clpa-success)" : "var(--clpa-subtle)"}
+          bg={dataChannelOpen ? "rgba(var(--clpa-success-bright-rgb),0.1)" : "rgba(var(--clpa-subtle-rgb),0.14)"}
+        />
+      </div>
       <div className="flex items-center gap-2 flex-wrap" style={{ marginBottom: 10 }}>
         <button
           type="button"
@@ -222,33 +231,27 @@ function CommunicationPanel({
           disabled={!micAvailable}
           className="flex items-center gap-1.5 clpa-focusable"
           style={{
-            padding: "5px 10px", borderRadius: 8, border: micEnabled ? "1px solid rgba(var(--clpa-success-bright-rgb),0.3)" : "1px solid var(--clpa-input-border)",
+            padding: "6px 11px", borderRadius: 8, border: micEnabled ? "1px solid rgba(var(--clpa-success-bright-rgb),0.3)" : "1px solid var(--clpa-input-border)",
             background: micEnabled ? "rgba(var(--clpa-success-bright-rgb),0.1)" : "var(--clpa-surface)", color: micEnabled ? "var(--clpa-success)" : "var(--clpa-muted)",
             fontSize: 10.5, fontWeight: 700, cursor: micAvailable ? "pointer" : "not-allowed",
           }}
         >
           {micEnabled ? <Mic size={12} strokeWidth={2.2} /> : <MicOff size={12} strokeWidth={2.2} />}
-          {micEnabled ? "Mic On" : "Mic Off"}
+          {micEnabled ? "Mic on" : "Mic off"}
         </button>
         {micError && <span style={{ fontSize: 9, color: "var(--clpa-warning-deep)" }}>{micError}</span>}
-        <div style={{ marginLeft: "auto" }}>
-          <CLPABadge
-            label={dataChannelOpen ? "Chat/file channel open" : "Connecting…"}
-            color={dataChannelOpen ? "var(--clpa-success)" : "var(--clpa-subtle)"}
-            bg={dataChannelOpen ? "rgba(var(--clpa-success-bright-rgb),0.1)" : "rgba(var(--clpa-subtle-rgb),0.14)"}
-          />
-        </div>
       </div>
 
-      <div className="flex items-center gap-1.5" style={{ marginBottom: 6 }}>
-        <MessageCircle size={11} style={{ color: "var(--clpa-primary)" }} strokeWidth={2} />
-        <span style={{ fontSize: 9.5, fontWeight: 700, color: "var(--clpa-body)" }}>Chat</span>
-      </div>
       <div
         className="clpa-scroll"
-        style={{ flex: 1, minHeight: 90, maxHeight: 160, overflowY: "auto", border: "1px solid var(--clpa-surface-border)", borderRadius: 10, padding: 8, marginBottom: 8, background: "var(--clpa-surface)" }}
+        style={{ flex: 1, minHeight: 110, maxHeight: 180, overflowY: "auto", border: "1px solid var(--clpa-surface-border)", borderRadius: 12, padding: 10, marginBottom: 8, background: "var(--clpa-surface)" }}
       >
-        {chatMessages.length === 0 && <div style={{ fontSize: 9.5, color: "var(--clpa-subtle)" }}>No messages yet.</div>}
+        {chatMessages.length === 0 && (
+          <div className="flex flex-col items-center justify-center text-center" style={{ padding: "18px 8px" }}>
+            <MessageCircle size={16} style={{ color: "var(--clpa-subtle)", marginBottom: 6 }} strokeWidth={2} />
+            <div style={{ fontSize: 10, color: "var(--clpa-subtle)" }}>No messages yet. Peer-to-peer once connected.</div>
+          </div>
+        )}
         {chatMessages.map((m, i) => {
           const mine = m.from === from;
           return (
@@ -282,7 +285,7 @@ function CommunicationPanel({
           placeholder={dataChannelOpen ? "Type a message…" : "Waiting for connection…"}
           className="clpa-focusable"
           autoComplete="off"
-          style={{ flex: 1, fontSize: 10.5, padding: "6px 9px", borderRadius: 8, border: "1px solid var(--clpa-input-border)", background: "var(--clpa-surface)", color: "var(--clpa-body)" }}
+          style={{ flex: 1, fontSize: 10.5, padding: "7px 10px", borderRadius: 8, border: "1px solid var(--clpa-input-border)", background: "var(--clpa-surface)", color: "var(--clpa-body)" }}
         />
         <button
           type="button"
@@ -290,7 +293,7 @@ function CommunicationPanel({
           disabled={!dataChannelOpen || !chatInput.trim()}
           className="flex items-center justify-center clpa-focusable"
           style={{
-            width: 30, height: 28, borderRadius: 8, border: "none", flexShrink: 0,
+            width: 32, height: 30, borderRadius: 8, border: "none", flexShrink: 0,
             background: dataChannelOpen && chatInput.trim() ? "var(--clpa-primary)" : "var(--clpa-track)",
             cursor: dataChannelOpen && chatInput.trim() ? "pointer" : "not-allowed",
           }}
@@ -299,9 +302,9 @@ function CommunicationPanel({
         </button>
       </div>
 
-      <div className="flex items-center gap-1.5" style={{ marginBottom: 6 }}>
+      <div className="flex items-center gap-1.5" style={{ marginBottom: 8 }}>
         <Paperclip size={11} style={{ color: "var(--clpa-primary)" }} strokeWidth={2} />
-        <span style={{ fontSize: 9.5, fontWeight: 700, color: "var(--clpa-body)" }}>File Transfer</span>
+        <span style={{ fontSize: 9.5, fontWeight: 700, color: "var(--clpa-body)" }}>File transfer</span>
         <span style={{ fontSize: 8, color: "var(--clpa-subtle)" }}>up to {Math.round(MAX_FILE_SIZE / 1024 / 1024)}MB</span>
       </div>
       {fileSendError && (
@@ -309,16 +312,30 @@ function CommunicationPanel({
           <AlertTriangle size={10} strokeWidth={2.2} /> {fileSendError}
         </div>
       )}
-      <div className="flex items-center gap-2" style={{ marginBottom: 8 }}>
+      <label
+        className="flex items-center justify-center gap-1.5 clpa-focusable"
+        style={{
+          marginBottom: 8,
+          padding: "10px 12px",
+          borderRadius: 10,
+          border: "1px dashed var(--clpa-input-border)",
+          background: "var(--clpa-surface)",
+          cursor: dataChannelOpen && sendingFileProgress == null ? "pointer" : "not-allowed",
+          fontSize: 10.5,
+          fontWeight: 700,
+          color: dataChannelOpen ? "var(--clpa-primary)" : "var(--clpa-subtle)",
+        }}
+      >
+        <Paperclip size={12} strokeWidth={2} />
+        {dataChannelOpen ? "Choose a file" : "Connect to send files"}
         <input
           ref={fileInputRef as RefObject<HTMLInputElement>}
           type="file"
           disabled={!dataChannelOpen || sendingFileProgress != null}
           onChange={(e) => onPickFile(e.target.files?.[0])}
-          className="clpa-focusable"
-          style={{ fontSize: 9.5, flex: 1 }}
+          style={{ display: "none" }}
         />
-      </div>
+      </label>
       {sendingFileProgress != null && (
         <div style={{ marginBottom: 8 }}>
           <div className="rounded-full overflow-hidden" style={{ height: 4, background: "var(--clpa-input-border)" }}>
@@ -424,7 +441,10 @@ type EnrollmentStatus = {
 };
 
 export default function ScreenSharePOC() {
-  const { navigate, startRemoteSession, endRemoteSession } = useApp();
+  const { startRemoteSession, endRemoteSession } = useApp();
+  const { data, connected } = useTelemetry();
+  const deviceName = connected && data?.system?.Name?.trim() ? data.system.Name.trim() : null;
+  const localIp = connected ? data?.localIp ?? null : null;
   const [role, setRole] = useState<Role>("share");
   const [enrollment, setEnrollment] = useState<EnrollmentStatus | null>(null);
 
@@ -880,9 +900,9 @@ export default function ScreenSharePOC() {
   const isConnected = connectionState === "connected";
 
   const MODE_META = {
-    screen: { label: "Screen Share", Icon: Monitor },
-    voice: { label: "Voice + Chat", Icon: Mic },
-    chat: { label: "Chat Only", Icon: MessageCircle },
+    screen: { label: "Screen share", Icon: Monitor, desc: "Operator sees this display. Pause anytime." },
+    voice: { label: "Voice + chat", Icon: Mic, desc: "Talk and message. No screen is shared." },
+    chat: { label: "Chat only", Icon: MessageCircle, desc: "Text and files. No mic or screen prompt." },
   } as const;
 
   // Purely cosmetic, self-contained feedback for the existing Copy Link button below - doesn't
@@ -922,36 +942,62 @@ export default function ScreenSharePOC() {
     return (
       <div
         className="flex flex-col items-center justify-center text-center"
-        style={{ padding: "28px 16px", borderRadius: 12, background: "var(--clpa-surface)", border: "1px dashed var(--clpa-input-border)" }}
+        style={{ padding: "36px 18px", borderRadius: 14, background: "var(--clpa-surface)", border: "1px dashed var(--clpa-input-border)" }}
       >
-        <div style={{ fontSize: 11, fontWeight: 700, color: "var(--clpa-body)" }}>{label}</div>
-        {sub && <div style={{ fontSize: 9.5, color: "var(--clpa-subtle)", marginTop: 3, maxWidth: 320 }}>{sub}</div>}
+        <div className="flex items-center justify-center rounded-full" style={{ width: 40, height: 40, background: "rgba(var(--clpa-primary-rgb),0.1)", marginBottom: 10 }}>
+          <Headphones size={18} style={{ color: "var(--clpa-primary)" }} strokeWidth={2} />
+        </div>
+        <div style={{ fontSize: 12, fontWeight: 700, color: "var(--clpa-title)" }}>{label}</div>
+        {sub && <div style={{ fontSize: 10, color: "var(--clpa-subtle)", marginTop: 4, maxWidth: 340, lineHeight: 1.45 }}>{sub}</div>}
       </div>
     );
   }
 
   return (
-    <CLPAPage compact>
-      {/* ─── Session Status Bar - the one persistent, glanceable anchor for this page's real
-          job (see the design plan): connection state, role, and mode never require hunting
-          through the page to find, regardless of which sub-state below is currently showing. */}
+    <CLPAPage>
+      <div className="grid gap-2.5" style={{ gridTemplateColumns: "repeat(4, minmax(0, 1fr))" }}>
+        {[
+          { label: "Session", value: connMeta.label, color: connMeta.color, Icon: Headphones, pulse: connMeta.pulse },
+          { label: "This PC", value: enrollment?.hostname || deviceName || "—", color: "var(--clpa-title)", Icon: Monitor, pulse: false },
+          { label: "Command Centre", value: enrollment == null ? "Checking…" : enrollment.enrolled ? "Enrolled" : "Not enrolled", color: enrollment?.enrolled ? "var(--clpa-success)" : enrollment == null ? "var(--clpa-muted)" : "var(--clpa-critical)", Icon: Wifi, pulse: false },
+          { label: "LAN", value: localIp || "—", color: "var(--clpa-title)", Icon: Share2, pulse: false },
+        ].map((tile) => (
+          <CLPACard key={tile.label} style={{ padding: "10px 12px" }}>
+            <div className="flex items-center gap-2">
+              <div className="flex items-center justify-center rounded-lg flex-shrink-0" style={{ width: 28, height: 28, background: "var(--clpa-surface)" }}>
+                <tile.Icon size={13} style={{ color: "var(--clpa-primary)" }} strokeWidth={2} />
+              </div>
+              <div className="min-w-0">
+                <div style={{ fontSize: 8, fontWeight: 700, color: "var(--clpa-subtle)", letterSpacing: 0.3 }}>{tile.label}</div>
+                <div className="flex items-center gap-1.5 min-w-0">
+                  {tile.pulse && <span className="clpa-dot" style={{ width: 7, height: 7, borderRadius: 999, background: tile.color, flexShrink: 0 }} />}
+                  <span style={{ fontSize: 12, fontWeight: 800, color: tile.color, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{tile.value}</span>
+                </div>
+              </div>
+            </div>
+          </CLPACard>
+        ))}
+      </div>
+
       <CLPACard style={{ padding: "10px 14px" }}>
         <div className="flex items-center justify-between gap-3 flex-wrap">
-          <div className="flex items-center gap-2.5">
+          <div className="flex items-center gap-2.5 min-w-0">
             <span
               className={connMeta.pulse ? "clpa-dot" : undefined}
               style={{ width: 10, height: 10, borderRadius: 999, background: connMeta.color, display: "inline-block", flexShrink: 0 }}
             />
-            <div>
-              <div style={{ fontSize: 11.5, fontWeight: 800, color: "var(--clpa-title)", lineHeight: 1.2 }}>{connMeta.label}</div>
-              <div style={{ fontSize: 8.5, color: "var(--clpa-subtle)" }}>
+            <div className="min-w-0">
+              <div style={{ fontSize: 12, fontWeight: 800, color: "var(--clpa-title)", lineHeight: 1.2 }}>
+                {role === "share" ? "You are sharing" : "You are joining"}
+              </div>
+              <div style={{ fontSize: 9, color: "var(--clpa-subtle)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                 {role === "share"
                   ? sessionId
                     ? `Session ${sessionId}`
                     : "No active session"
                   : joinSessionId
                   ? `Joining ${joinSessionId}`
-                  : "No session joined"}
+                  : "Paste a session ID from the share side"}
               </div>
             </div>
             {(shareStatus !== "idle" || viewStatus !== "idle") && (
@@ -960,18 +1006,16 @@ export default function ScreenSharePOC() {
           </div>
 
           <div className="flex items-center gap-2">
-            {/* Real segmented role switcher - same switchRole(next) handler as before, just a
-                clearer two-way control instead of two independently-styled buttons. */}
             <div className="flex items-center" style={{ background: "var(--clpa-divider)", borderRadius: 8, padding: 2 }}>
               <button
                 onClick={() => switchRole("share")}
                 className="flex items-center gap-1.5 clpa-focusable"
                 style={{
-                  padding: "5px 10px", borderRadius: 6, border: "none", cursor: "pointer",
+                  padding: "6px 12px", borderRadius: 6, border: "none", cursor: "pointer",
                   background: role === "share" ? "var(--clpa-card)" : "transparent",
                   color: role === "share" ? "var(--clpa-primary)" : "var(--clpa-muted)",
                   boxShadow: role === "share" ? "0 1px 3px rgba(0,0,0,0.08)" : "none",
-                  fontSize: 10, fontWeight: 700,
+                  fontSize: 10.5, fontWeight: 700,
                 }}
               >
                 <Share2 size={11} strokeWidth={2.2} /> Share
@@ -980,14 +1024,14 @@ export default function ScreenSharePOC() {
                 onClick={() => switchRole("view")}
                 className="flex items-center gap-1.5 clpa-focusable"
                 style={{
-                  padding: "5px 10px", borderRadius: 6, border: "none", cursor: "pointer",
+                  padding: "6px 12px", borderRadius: 6, border: "none", cursor: "pointer",
                   background: role === "view" ? "var(--clpa-card)" : "transparent",
                   color: role === "view" ? "var(--clpa-primary)" : "var(--clpa-muted)",
                   boxShadow: role === "view" ? "0 1px 3px rgba(0,0,0,0.08)" : "none",
-                  fontSize: 10, fontWeight: 700,
+                  fontSize: 10.5, fontWeight: 700,
                 }}
               >
-                <Eye size={11} strokeWidth={2.2} /> View
+                <Eye size={11} strokeWidth={2.2} /> Join
               </button>
             </div>
             <button
@@ -1013,14 +1057,15 @@ export default function ScreenSharePOC() {
         </CLPACard>
       )}
 
-      {/* Environment check - honest, not assumed, kept but condensed to a single-line badge
-          rather than a full banner, since it's rarely the interesting state. */}
-      <div className="flex items-center gap-1.5" style={{ fontSize: 9, color: "var(--clpa-subtle)" }}>
-        {isSecureContext ? <ShieldCheck size={11} style={{ color: "var(--clpa-success)" }} strokeWidth={2.2} /> : <ShieldAlert size={11} style={{ color: "var(--clpa-critical)" }} strokeWidth={2.2} />}
-        <span style={{ color: isSecureContext ? "var(--clpa-success)" : "var(--clpa-critical)", fontWeight: 700 }}>
-          {isSecureContext ? "Secure context" : "Not a secure context"}
+      <div className="flex items-center gap-3 flex-wrap" style={{ fontSize: 9.5, color: "var(--clpa-subtle)" }}>
+        <span className="flex items-center gap-1">
+          {isSecureContext ? <ShieldCheck size={12} style={{ color: "var(--clpa-success)" }} strokeWidth={2.2} /> : <ShieldAlert size={12} style={{ color: "var(--clpa-critical)" }} strokeWidth={2.2} />}
+          <span style={{ color: isSecureContext ? "var(--clpa-success)" : "var(--clpa-critical)", fontWeight: 700 }}>
+            {isSecureContext ? "Secure context" : "Not a secure context"}
+          </span>
         </span>
-        <span>· getDisplayMedia {hasDisplayMediaApi ? "available" : "unavailable"}</span>
+        <span>· Screen capture {hasDisplayMediaApi ? "available" : "unavailable"}</span>
+        <span>· STUN only — no TURN relay</span>
       </div>
 
       {timedOut && (
@@ -1048,33 +1093,77 @@ export default function ScreenSharePOC() {
           )}
 
           {shareStatus === "idle" && (
-            <CLPACard style={{ padding: "16px" }}>
-              <div style={{ fontSize: 10.5, fontWeight: 700, color: "var(--clpa-body)", marginBottom: 2 }}>Start a session</div>
-              <div style={{ fontSize: 9.5, color: "var(--clpa-subtle)", marginBottom: 12 }}>
-                An operator will see the request instantly on the Command Center dashboard and can join.
-              </div>
-              <div className="grid gap-2.5" style={{ gridTemplateColumns: "1fr 1fr 1fr" }}>
-                {(Object.entries(MODE_META) as [keyof typeof MODE_META, typeof MODE_META[keyof typeof MODE_META]][]).map(([mode, meta]) => (
-                  <button
-                    key={mode}
-                    onClick={() => startSession(mode)}
-                    className="flex flex-col items-center text-center clpa-focusable clpa-card-hover"
-                    style={{ padding: "16px 10px", borderRadius: 12, border: "1px solid var(--clpa-card-border)", background: mode === "screen" ? "rgba(var(--clpa-primary-rgb),0.05)" : "var(--clpa-surface)", cursor: "pointer" }}
-                  >
-                    <div
-                      className="flex items-center justify-center rounded-full"
-                      style={{ width: 34, height: 34, background: mode === "screen" ? "rgba(var(--clpa-primary-rgb),0.12)" : "rgba(var(--clpa-muted-rgb),0.1)", marginBottom: 8 }}
+            <div className="grid gap-2.5" style={{ gridTemplateColumns: "minmax(0, 1.15fr) minmax(0, 0.85fr)" }}>
+              <CLPACard style={{ padding: "18px 16px" }}>
+                <div className="flex items-center gap-2 mb-2">
+                  <div className="flex items-center justify-center rounded-xl" style={{ width: 36, height: 36, background: "rgba(var(--clpa-primary-rgb),0.12)" }}>
+                    <Headphones size={18} style={{ color: "var(--clpa-primary)" }} strokeWidth={2} />
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 14, fontWeight: 800, color: "var(--clpa-title)" }}>Start assistance</div>
+                    <div style={{ fontSize: 10, color: "var(--clpa-subtle)" }}>Command Centre sees the request and can join.</div>
+                  </div>
+                </div>
+                <div className="grid gap-2" style={{ gridTemplateColumns: "1fr 1fr 1fr", marginTop: 14 }}>
+                  {(Object.entries(MODE_META) as [keyof typeof MODE_META, typeof MODE_META[keyof typeof MODE_META]][]).map(([mode, meta]) => (
+                    <button
+                      key={mode}
+                      onClick={() => startSession(mode)}
+                      className="flex flex-col items-start text-left clpa-focusable clpa-card-hover"
+                      style={{
+                        padding: "14px 12px",
+                        borderRadius: 12,
+                        border: mode === "screen" ? "1px solid rgba(var(--clpa-primary-rgb),0.35)" : "1px solid var(--clpa-card-border)",
+                        background: mode === "screen" ? "rgba(var(--clpa-primary-rgb),0.06)" : "var(--clpa-surface)",
+                        cursor: "pointer",
+                        minHeight: 132,
+                      }}
                     >
-                      <meta.Icon size={16} style={{ color: mode === "screen" ? "var(--clpa-primary)" : "var(--clpa-muted)" }} strokeWidth={2} />
+                      <div
+                        className="flex items-center justify-center rounded-lg"
+                        style={{ width: 32, height: 32, background: mode === "screen" ? "rgba(var(--clpa-primary-rgb),0.14)" : "rgba(var(--clpa-subtle-rgb),0.12)", marginBottom: 10 }}
+                      >
+                        <meta.Icon size={15} style={{ color: mode === "screen" ? "var(--clpa-primary)" : "var(--clpa-muted)" }} strokeWidth={2} />
+                      </div>
+                      <div style={{ fontSize: 12, fontWeight: 800, color: "var(--clpa-title)" }}>{meta.label}</div>
+                      <div style={{ fontSize: 9.5, color: "var(--clpa-subtle)", marginTop: 4, lineHeight: 1.4 }}>{meta.desc}</div>
+                      {mode === "screen" && (
+                        <span style={{ fontSize: 8, fontWeight: 700, color: "var(--clpa-primary)", marginTop: 8 }}>Recommended</span>
+                      )}
+                    </button>
+                  ))}
+                </div>
+              </CLPACard>
+
+              <CLPACard style={{ padding: "18px 16px" }}>
+                <div style={{ fontSize: 11, fontWeight: 800, color: "var(--clpa-title)", letterSpacing: 0.3, marginBottom: 12 }}>HOW IT WORKS</div>
+                {[
+                  { n: "1", title: "Start a mode", body: "Screen, voice, or chat. This PC creates a real signaling session." },
+                  { n: "2", title: "Operator joins", body: "Command Centre sees the request. Share the session ID if they join from a browser." },
+                  { n: "3", title: "Talk and send files", body: "Chat and files go peer-to-peer. Pause screen share whenever you need." },
+                ].map((step) => (
+                  <div key={step.n} className="flex items-start gap-2.5" style={{ marginBottom: 12 }}>
+                    <div className="flex items-center justify-center rounded-full flex-shrink-0" style={{ width: 22, height: 22, background: "rgba(var(--clpa-primary-rgb),0.12)", fontSize: 10, fontWeight: 800, color: "var(--clpa-primary)" }}>
+                      {step.n}
                     </div>
-                    <div style={{ fontSize: 10.5, fontWeight: 700, color: "var(--clpa-title)" }}>{meta.label}</div>
-                    <div style={{ fontSize: 8.5, color: "var(--clpa-subtle)", marginTop: 2 }}>
-                      {mode === "screen" ? "Show your screen" : mode === "voice" ? "Talk without sharing" : "Text only, no prompts"}
+                    <div>
+                      <div style={{ fontSize: 11, fontWeight: 700, color: "var(--clpa-title)" }}>{step.title}</div>
+                      <div style={{ fontSize: 9.5, color: "var(--clpa-muted)", lineHeight: 1.4, marginTop: 2 }}>{step.body}</div>
                     </div>
-                  </button>
+                  </div>
                 ))}
-              </div>
-            </CLPACard>
+                <div className="flex items-center gap-1.5" style={{ borderTop: "1px solid var(--clpa-divider)", paddingTop: 10, marginTop: 4 }}>
+                  {enrollment?.enrolled ? (
+                    <CheckCircle2 size={12} style={{ color: "var(--clpa-success)" }} strokeWidth={2} />
+                  ) : (
+                    <Clock size={12} style={{ color: "var(--clpa-warning)" }} strokeWidth={2} />
+                  )}
+                  <span style={{ fontSize: 9.5, color: "var(--clpa-subtle)" }}>
+                    {enrollment?.enrolled ? "Listed on Command Centre" : "Enroll in Settings so Command Centre can see this PC"}
+                  </span>
+                </div>
+              </CLPACard>
+            </div>
           )}
 
           {(shareStatus === "starting" || shareStatus === "creating-session") && (
@@ -1185,25 +1274,45 @@ export default function ScreenSharePOC() {
           )}
 
           {viewStatus === "idle" && (
-            <CLPACard style={{ padding: "16px" }}>
-              <div style={{ fontSize: 10.5, fontWeight: 700, color: "var(--clpa-body)", marginBottom: 8 }}>Join a session</div>
-              <div style={{ fontSize: 8.5, color: "var(--clpa-subtle)", fontWeight: 600, marginBottom: 3 }}>SESSION ID</div>
+            <div className="grid gap-2.5" style={{ gridTemplateColumns: "minmax(0, 1.1fr) minmax(0, 0.9fr)" }}>
+            <CLPACard style={{ padding: "20px 18px" }}>
+              <div className="flex items-center gap-2 mb-3">
+                <div className="flex items-center justify-center rounded-xl" style={{ width: 36, height: 36, background: "rgba(var(--clpa-primary-rgb),0.12)" }}>
+                  <Eye size={18} style={{ color: "var(--clpa-primary)" }} strokeWidth={2} />
+                </div>
+                <div>
+                  <div style={{ fontSize: 14, fontWeight: 800, color: "var(--clpa-title)" }}>Join a session</div>
+                  <div style={{ fontSize: 10, color: "var(--clpa-subtle)" }}>Use the session ID from the share side.</div>
+                </div>
+              </div>
+              <div style={{ fontSize: 8.5, color: "var(--clpa-subtle)", fontWeight: 700, letterSpacing: 0.3, marginBottom: 4 }}>SESSION ID</div>
               <input
                 value={joinSessionId}
                 onChange={(e) => setJoinSessionId(e.target.value)}
-                placeholder="Session ID from the Share side"
+                placeholder="Paste session ID"
                 className="clpa-focusable"
-                style={{ width: "100%", fontFamily: "monospace", fontSize: 10.5, padding: "7px 10px", borderRadius: 8, border: "1px solid var(--clpa-input-border)", background: "var(--clpa-surface)", color: "var(--clpa-body)", marginBottom: 10 }}
+                style={{ width: "100%", fontFamily: "monospace", fontSize: 12, padding: "9px 11px", borderRadius: 8, border: "1px solid var(--clpa-input-border)", background: "var(--clpa-surface)", color: "var(--clpa-body)", marginBottom: 12 }}
               />
               <button
                 onClick={joinSession}
                 disabled={!joinSessionId.trim()}
                 className="flex items-center gap-1.5 clpa-focusable"
-                style={{ padding: "7px 14px", borderRadius: 8, border: "none", background: joinSessionId.trim() ? "var(--clpa-primary)" : "var(--clpa-track)", color: "#FFFFFF", fontSize: 10.5, fontWeight: 700, cursor: joinSessionId.trim() ? "pointer" : "not-allowed" }}
+                style={{ padding: "8px 16px", borderRadius: 8, border: "none", background: joinSessionId.trim() ? "var(--clpa-primary)" : "var(--clpa-track)", color: "#FFFFFF", fontSize: 11, fontWeight: 700, cursor: joinSessionId.trim() ? "pointer" : "not-allowed" }}
               >
-                <Eye size={12} strokeWidth={2.2} /> Join Session
+                <Eye size={13} strokeWidth={2.2} /> Join session
               </button>
             </CLPACard>
+            <CLPACard style={{ padding: "18px 16px" }}>
+              <div style={{ fontSize: 11, fontWeight: 800, color: "var(--clpa-title)", letterSpacing: 0.3, marginBottom: 12 }}>ON THIS ROLE</div>
+              <div style={{ fontSize: 10.5, color: "var(--clpa-muted)", lineHeight: 1.5, marginBottom: 12 }}>
+                Join is for watching a share that already started. Operators normally join from Command Centre. Use this if you have a session ID from another tab or browser.
+              </div>
+              <div className="flex items-start gap-2" style={{ fontSize: 10, color: "var(--clpa-subtle)", lineHeight: 1.45 }}>
+                <ShieldCheck size={13} style={{ color: "var(--clpa-success)", flexShrink: 0, marginTop: 1 }} strokeWidth={2} />
+                Signaling goes through this device’s enrolled backend. Media is peer-to-peer.
+              </div>
+            </CLPACard>
+            </div>
           )}
 
           {(viewStatus === "connecting" || viewStatus === "answering") && (

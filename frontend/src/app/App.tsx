@@ -70,14 +70,14 @@ import {
   getDriverDataCompleteness,
 } from "./lib/derived";
 import {
-  LayoutDashboard, Brain, Cpu, Award, CreditCard,
+  LayoutDashboard, Brain, Cpu, Award,
   Headphones, RefreshCw, Bell, Settings,
   User, Wifi, Shield, ShieldCheck, AlertTriangle, TrendingUp, Download,
   HardDrive, Thermometer, Network, Battery, Server,
-  ChevronDown, Zap, Activity, CheckCircle2, Clock,
+  ChevronDown, Zap, Activity, CheckCircle2, Clock, TrendingDown, Search,
   MonitorCheck, MemoryStick, Database, Layers,
   Radio, Globe, Package, Fingerprint, BarChart3, MessageCircle, Send,
-  Gauge, Wind, Plug, Hash, Tag, MoreHorizontal, Minus, Square, X, EyeOff, Lock, Unlock, Trash2
+  Gauge, Wind, Plug, Hash, Tag, Minus, Square, X, EyeOff, Lock, Unlock, Trash2
 } from "lucide-react";
 import { AppProvider, useApp, type QuietHours } from "./context/AppContext";
 import ScreenSharePOC from "./remote-poc/ScreenSharePOC";
@@ -753,7 +753,7 @@ function Sidebar() {
         >
           <User size={14} color="white" strokeWidth={2} />
         </div>
-        <span style={{ fontSize: 7.5, color: "var(--clpa-subtle)", marginTop: 2 }}>Admin</span>
+        <span style={{ fontSize: 7.5, color: "var(--clpa-subtle)", marginTop: 2 }}>Account</span>
       </button>
     </div>
   );
@@ -766,8 +766,8 @@ const SCREEN_META: Record<string, { title: string; sub: string }> = {
   hardware: { title: "Hardware", sub: "Hardware attestation and component health." },
   warranty: { title: "Warranty", sub: "Warranty governance and lifecycle tracking." },
   subscription: { title: "Subscription", sub: "Subscription and billing management." },
-  remote: { title: "Remote Assistance", sub: "Active sessions and remote support." },
-  notifications: { title: "Alerts", sub: "Notifications and system alerts." },
+  remote: { title: "Remote Assistance", sub: "Share this device with Command Centre." },
+  notifications: { title: "Alerts", sub: "Live rule alerts for this device." },
   settings: { title: "Settings", sub: "Platform configuration and preferences." },
 };
 
@@ -864,7 +864,7 @@ function Dashboard() {
 
 // ─── CPU Card ─────────────────────────────────────────────
 function CPUCard() {
-  const { performAction, thresholds } = useApp();
+  const { thresholds } = useApp();
   const { data, connected } = useTelemetry();
   const cpu = data?.cpu;
 
@@ -923,9 +923,6 @@ function CPUCard() {
           <span style={{ fontSize: 12, fontWeight: 700, color: "var(--clpa-title)" }}>CPU</span>
           <StatusBadge label={cpuBadgeLabel} sample={cpuBadgeSample} />
         </div>
-        <button onClick={() => performAction("card-menu-cpu", "CPU options")} style={{ background: "none", border: "none", cursor: "pointer", padding: 2 }}>
-          <MoreHorizontal size={14} style={{ color: "var(--clpa-track)" }} strokeWidth={2} />
-        </button>
       </div>
 
       <div className="flex items-center gap-3 mb-2.5">
@@ -1269,7 +1266,7 @@ function BatteryCard() {
 
 // ─── Memory Card ──────────────────────────────────────────
 function MemoryCard() {
-  const { performAction, thresholds } = useApp();
+  const { thresholds } = useApp();
   const { data, connected } = useTelemetry();
   const memory = data?.memory;
 
@@ -1316,9 +1313,6 @@ function MemoryCard() {
           <span style={{ fontSize: 12, fontWeight: 700, color: "var(--clpa-title)" }}>Memory</span>
           <StatusBadge label={memBadgeLabel} sample={memBadgeSample} />
         </div>
-        <button onClick={() => performAction("card-menu-memory", "Memory options")} style={{ background: "none", border: "none", cursor: "pointer", padding: 2 }}>
-          <MoreHorizontal size={14} style={{ color: "var(--clpa-track)" }} strokeWidth={2} />
-        </button>
       </div>
 
       <div className="flex items-center gap-3 mb-2.5">
@@ -1405,7 +1399,6 @@ function MemoryCard() {
 
 // ─── Storage Card ─────────────────────────────────────────
 function StorageCard() {
-  const { performAction } = useApp();
   const { data, connected } = useTelemetry();
   const volumes = listLogicalVolumes(data, connected);
   const drives = listPhysicalDrives(data, connected);
@@ -1455,9 +1448,6 @@ function StorageCard() {
           <span style={{ fontSize: 12, fontWeight: 700, color: "var(--clpa-title)" }}>Storage</span>
           <StatusBadge label={storageBadgeLabel} sample={storageBadgeSample} />
         </div>
-        <button onClick={() => performAction("card-menu-storage", "Storage options")} style={{ background: "none", border: "none", cursor: "pointer", padding: 2 }}>
-          <MoreHorizontal size={14} style={{ color: "var(--clpa-track)" }} strokeWidth={2} />
-        </button>
       </div>
 
       <div className="flex items-start gap-3 mb-2.5 min-h-0 flex-1">
@@ -1752,7 +1742,7 @@ function ThermalCard() {
 
 // ─── GPU Card ─────────────────────────────────────────────
 function GPUCard() {
-  const { performAction, thresholds } = useApp();
+  const { thresholds } = useApp();
   const { data, connected } = useTelemetry();
   const gpus = listDisplayGpus(data, connected);
   const gpuInfo = getPrimaryGpu(data, connected);
@@ -1791,9 +1781,6 @@ function GPUCard() {
           <span style={{ fontSize: 12, fontWeight: 700, color: "var(--clpa-title)" }}>GPU</span>
           <StatusBadge label={gpuBadgeLabel} sample={gpuBadgeSample} />
         </div>
-        <button onClick={() => performAction("card-menu-gpu", "GPU options")} style={{ background: "none", border: "none", cursor: "pointer", padding: 2 }}>
-          <MoreHorizontal size={14} style={{ color: "var(--clpa-track)" }} strokeWidth={2} />
-        </button>
       </div>
 
       <div className="flex items-center gap-3">
@@ -1891,7 +1878,6 @@ function formatDeviceAge(raw: string | null | undefined): string | null {
 
 // ─── OS Card ──────────────────────────────────────────────
 function OSCard() {
-  const { performAction } = useApp();
   const { data, connected } = useTelemetry();
   const osDetail = data?.osDetail;
 
@@ -1965,9 +1951,6 @@ function OSCard() {
         </div>
         <div className="flex items-center gap-1 flex-shrink-0">
           <StatusBadge label={osUpdateBadgeLabel} sample={osUpdateBadgeSample} />
-          <button onClick={() => performAction("card-menu-os", "Operating System options")} style={{ background: "none", border: "none", cursor: "pointer", padding: 2 }}>
-            <MoreHorizontal size={14} style={{ color: "var(--clpa-track)" }} strokeWidth={2} />
-          </button>
         </div>
       </div>
 
@@ -2002,7 +1985,7 @@ function OSCard() {
 
 // ─── Hardware Inventory Card ──────────────────────────────
 function HardwareInventoryCard() {
-  const { performAction, navigate } = useApp();
+  const { navigate } = useApp();
   const { data, connected } = useTelemetry();
   const board = data?.board;
   const bios = data?.bios;
@@ -2055,9 +2038,6 @@ function HardwareInventoryCard() {
         </div>
         <div className="flex items-center gap-1 flex-shrink-0">
           <StatusBadge label={hwInventoryBadge.label} sample={hwInventoryBadge.sample} />
-          <button onClick={() => performAction("card-menu-hardware", "Hardware inventory options")} style={{ background: "none", border: "none", cursor: "pointer", padding: 2 }}>
-            <MoreHorizontal size={14} style={{ color: "var(--clpa-track)" }} strokeWidth={2} />
-          </button>
         </div>
       </div>
 
@@ -2357,7 +2337,7 @@ function AISparkline({ data, color, w = 60, h = 24 }: { data: number[]; color: s
 // ═══ Row 1 ═════════════════════════════════════════════════
 function AIRow1() {
   return (
-    <CLPARow columns="minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr)">
+    <CLPARow columns="minmax(0, 1.05fr) minmax(0, 0.95fr) minmax(0, 1.2fr)">
       <AIHealthScoreCard />
       <AIVerdictCard />
       <AITopPredictionsCard />
@@ -2499,44 +2479,53 @@ function AIHealthScoreCard() {
 
         {/* Right: stats */}
         <div className="flex-1 flex flex-col gap-2">
-          <div className="flex items-center justify-between rounded-lg px-2.5 py-2" style={{ background: "rgba(var(--clpa-success-bright-rgb),0.06)", border: "1px solid rgba(var(--clpa-success-bright-rgb),0.15)" }}>
+          <div
+            className="flex items-center justify-between rounded-lg px-2.5 py-2"
+            style={{
+              background: !scoreDeltaReal
+                ? "rgba(var(--clpa-subtle-rgb),0.08)"
+                : scoreDelta!.delta >= 0
+                ? "rgba(var(--clpa-success-bright-rgb),0.08)"
+                : "rgba(var(--clpa-critical-bright-rgb),0.08)",
+              border: !scoreDeltaReal
+                ? "1px solid var(--clpa-surface-border)"
+                : scoreDelta!.delta >= 0
+                ? "1px solid rgba(var(--clpa-success-bright-rgb),0.18)"
+                : "1px solid rgba(var(--clpa-critical-bright-rgb),0.18)",
+            }}
+          >
             <div className="flex items-center gap-1.5">
-              <TrendingUp size={14} style={{ color: scoreDeltaColor }} strokeWidth={2.5} />
+              {scoreDeltaReal && scoreDelta!.delta < 0
+                ? <TrendingDown size={14} style={{ color: scoreDeltaColor }} strokeWidth={2.5} />
+                : <TrendingUp size={14} style={{ color: scoreDeltaColor }} strokeWidth={2.5} />}
               <div className="flex flex-col">
-                <div className="flex items-center gap-1">
-                  <span style={{ fontSize: 13, fontWeight: 800, color: scoreDeltaColor, lineHeight: 1 }}>{scoreDeltaLabel}</span>
-                </div>
+                <span style={{ fontSize: 13, fontWeight: 800, color: scoreDeltaColor, lineHeight: 1 }}>{scoreDeltaLabel}</span>
                 <span style={{ fontSize: 8.5, color: "var(--clpa-subtle)", marginTop: 2 }}>{scoreDeltaSub}</span>
               </div>
             </div>
           </div>
 
-          {/* Replaces the old fabricated "Confidence: 96%" - an honest count of how many of the
-              3 sub-scores below are backed by real telemetry vs. their sample fallback. */}
           <div className="flex items-center justify-between rounded-lg px-2.5 py-2" style={{ background: "rgba(var(--clpa-primary-rgb),0.06)", border: "1px solid rgba(var(--clpa-primary-rgb),0.15)" }}>
             <div className="flex items-center gap-1.5">
-              <Shield size={14} style={{ color: "var(--clpa-primary)" }} strokeWidth={2} />
-              <span style={{ fontSize: 9.5, color: "var(--clpa-muted)", fontWeight: 500 }}>Real Data</span>
+              <Activity size={14} style={{ color: "var(--clpa-primary)" }} strokeWidth={2} />
+              <span style={{ fontSize: 9.5, color: "var(--clpa-muted)", fontWeight: 500 }}>Sensors</span>
             </div>
             <span style={{ fontSize: 17, fontWeight: 800, color: "var(--clpa-title)", lineHeight: 1 }}>{realCount}/3</span>
           </div>
         </div>
       </div>
 
-      {/* Sub-score breakdown footer */}
-      <div className="flex flex-col gap-2.5 mt-3" style={{ borderTop: "1px solid var(--clpa-divider)", paddingTop: 10 }}>
+      <div className="flex flex-col gap-2 mt-3" style={{ borderTop: "1px solid var(--clpa-divider)", paddingTop: 10 }}>
         {subScores.map((s, i) => (
           <div key={i} className="flex flex-col gap-1">
             <div className="flex items-center gap-2">
-              <span style={{ fontSize: 9, color: "var(--clpa-muted)", fontWeight: 500, width: 62, flexShrink: 0 }}>{s.label}</span>
+              <span style={{ fontSize: 9.5, color: "var(--clpa-muted)", fontWeight: 600, width: 72, flexShrink: 0 }}>{s.label}</span>
               <div className="flex-1 rounded-full overflow-hidden" style={{ height: 5, background: "var(--clpa-divider)" }}>
                 <div style={{ width: `${s.value ?? 0}%`, height: "100%", background: s.color, borderRadius: 4, opacity: s.value == null ? 0.25 : 1 }} />
               </div>
-              <div className="flex items-center gap-1" style={{ width: 28, justifyContent: "flex-end", flexShrink: 0 }}>
-                <span style={{ fontSize: 9.5, fontWeight: 700, color: s.color }}>{s.value ?? "—"}</span>
-              </div>
+              <span style={{ fontSize: 11, fontWeight: 700, color: s.color, width: 28, textAlign: "right", flexShrink: 0 }}>{s.value ?? "—"}</span>
             </div>
-            <span style={{ fontSize: 8.5, color: "var(--clpa-subtle)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{s.detail}</span>
+            <span style={{ fontSize: 9, color: "var(--clpa-subtle)", lineHeight: 1.3, paddingLeft: 74 }}>{s.detail}</span>
           </div>
         ))}
       </div>
@@ -2587,10 +2576,39 @@ function AIVerdictCard() {
   const compliantOk = security.ok;
 
   const badges = [
-    { label: "Stable\nPerformance", Icon: Activity, ok: stablePerformanceOk, real: stablePerformanceReal },
-    { label: "Low\nRisk", Icon: TrendingUp, ok: lowRiskOk, real: lowRiskReal },
-    { label: "No Issues\nDetected", Icon: CheckCircle2, ok: noIssuesOk, real: noIssuesReal },
-    { label: "Protected\n& Compliant", Icon: Shield, ok: compliantOk, real: compliantReal },
+    {
+      label: "Performance",
+      Icon: Activity,
+      ok: stablePerformanceOk,
+      real: stablePerformanceReal,
+      detail: stablePerformanceReal ? `CPU ${cpuLoad}% · RAM ${memUsedPct}%` : "Waiting on CPU / RAM",
+    },
+    {
+      label: "Wear risk",
+      Icon: TrendingUp,
+      ok: lowRiskOk,
+      real: lowRiskReal,
+      detail: !lowRiskReal
+        ? "Waiting on battery / SSD"
+        : [
+            batteryHealthPct != null ? `Battery ${batteryHealthPct}%` : null,
+            storageWearPercent != null ? `SSD wear ${storageWearPercent}%` : null,
+          ].filter(Boolean).join(" · "),
+    },
+    {
+      label: "Active issues",
+      Icon: CheckCircle2,
+      ok: noIssuesOk,
+      real: noIssuesReal,
+      detail: noIssuesOk ? "No live breaches" : "One or more sensors out of range",
+    },
+    {
+      label: "Compliance",
+      Icon: Shield,
+      ok: compliantOk,
+      real: compliantReal,
+      detail: compliantReal ? describeSecuritySignals(data, connected) : "Waiting on security sensors",
+    },
   ];
 
   const judged = badges.filter((b) => b.real);
@@ -2615,41 +2633,39 @@ function AIVerdictCard() {
 
   return (
     <AICard style={{ padding: "12px 14px", display: "flex", flexDirection: "column" }}>
-      <div className="flex items-center gap-1.5 mb-1">
+      <div className="flex items-center gap-1.5 mb-2">
         <span style={{ fontSize: 11, fontWeight: 800, color: "var(--clpa-title)", letterSpacing: 0.4 }}>AI VERDICT</span>
         <AIInfo text="Same live CPU, memory, battery, storage, TPM, Secure Boot, and BitLocker signals as Health Score. Missing data is Unknown, not treated as healthy." />
       </div>
 
-      {/* Headline block (fills upper space) */}
-      <div className="flex flex-col items-center justify-center flex-1" style={{ textAlign: "center" }}>
-        <div className="flex items-center gap-1.5 rounded-full mb-3" style={{ background: verdictBg, border: verdictBorder, padding: "4px 12px" }}>
+      <div className="flex flex-col items-start gap-1.5 mb-3" style={{ background: verdictBg, border: verdictBorder, borderRadius: 12, padding: "10px 12px" }}>
+        <div className="flex items-center gap-1.5">
           <span className="clpa-dot" style={{ width: 7, height: 7, borderRadius: 999, background: verdictColor, display: "inline-block" }} />
-          <span style={{ fontSize: 10, fontWeight: 700, color: verdictColor }}>{pillText}</span>
-          {!anyReal && <SampleTag />}
+          <span style={{ fontSize: 9.5, fontWeight: 700, color: verdictColor }}>{pillText}</span>
         </div>
-
-        <div style={{ fontSize: 38, fontWeight: 900, color: verdictColor, marginBottom: 6, lineHeight: 1 }}>{verdictText}</div>
-        <div style={{ fontSize: 11, color: "var(--clpa-muted)", lineHeight: 1.35, maxWidth: 240, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-          {verdictBody}
-        </div>
+        <div style={{ fontSize: 22, fontWeight: 800, color: verdictColor, lineHeight: 1.1 }}>{verdictText}</div>
+        <div style={{ fontSize: 10.5, color: "var(--clpa-muted)", lineHeight: 1.4 }}>{verdictBody}</div>
       </div>
 
-      {/* 4 status badges (bigger) - a failing check gets a visually distinct amber/alert
-          treatment (different icon, icon color, and circle styling), not just a color swap on
-          the same checkmark, so a "Needs Attention" verdict doesn't look identical to "All Good". */}
-      <div className="flex items-start justify-between w-full gap-1.5 mt-3">
-        {badges.map(({ label, Icon, ok, real }, i) => {
-          const DisplayIcon = !real ? Icon : ok ? Icon : AlertTriangle;
+      <div className="flex flex-col gap-1.5 flex-1 min-h-0">
+        {badges.map(({ label, Icon, ok, real, detail }) => {
+          const status = !real ? "Unknown" : ok ? "Pass" : "Attention";
+          const statusColor = !real ? "var(--clpa-muted)" : ok ? "var(--clpa-success)" : "var(--clpa-warning)";
+          const statusBg = !real ? "rgba(var(--clpa-subtle-rgb),0.1)" : ok ? "rgba(var(--clpa-success-bright-rgb),0.12)" : "rgba(var(--clpa-warning-bright-rgb),0.12)";
           const iconColor = !real ? "var(--clpa-muted)" : ok ? "var(--clpa-success-bright)" : "var(--clpa-warning)";
-          const circleBg = !real ? "rgba(var(--clpa-subtle-rgb),0.1)" : ok ? "rgba(var(--clpa-success-bright-rgb),0.08)" : "rgba(var(--clpa-warning-bright-rgb),0.12)";
-          const circleBorder = !real ? "1.5px solid var(--clpa-surface-border)" : ok ? "1.5px solid rgba(var(--clpa-success-bright-rgb),0.35)" : "1.5px solid rgba(var(--clpa-warning-bright-rgb),0.4)";
+          const DisplayIcon = !real ? Icon : ok ? Icon : AlertTriangle;
           return (
-            <div key={i} className="flex-1 flex flex-col items-center gap-1.5 rounded-xl py-2.5" style={{ background: "var(--clpa-surface)", border: "1px solid var(--clpa-surface-border)" }}>
-              <div className="flex items-center justify-center rounded-full" style={{ width: 34, height: 34, border: circleBorder, background: circleBg }}>
-                <DisplayIcon size={15} style={{ color: iconColor }} strokeWidth={1.8} />
+            <div key={label} className="flex items-center gap-2 rounded-lg" style={{ background: "var(--clpa-surface)", border: "1px solid var(--clpa-surface-border)", padding: "7px 8px" }}>
+              <div className="flex items-center justify-center rounded-md flex-shrink-0" style={{ width: 24, height: 24, background: statusBg }}>
+                <DisplayIcon size={13} style={{ color: iconColor }} strokeWidth={2} />
               </div>
-              <span style={{ fontSize: 8.5, color: "var(--clpa-muted)", fontWeight: 500, lineHeight: 1.3, textAlign: "center", whiteSpace: "pre-line" }}>{label}</span>
-              {!real && <SampleTag />}
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center justify-between gap-2">
+                  <span style={{ fontSize: 10.5, fontWeight: 700, color: "var(--clpa-title)" }}>{label}</span>
+                  <span style={{ fontSize: 8, fontWeight: 700, color: statusColor, background: statusBg, borderRadius: 4, padding: "1px 6px", flexShrink: 0 }}>{status}</span>
+                </div>
+                <div style={{ fontSize: 9, color: "var(--clpa-subtle)", lineHeight: 1.3, marginTop: 1 }}>{detail}</div>
+              </div>
             </div>
           );
         })}
@@ -2709,7 +2725,7 @@ function predictionToLifeDisplay(
         sub: `Collecting data (day ${prediction.daysOfHistory} of ${prediction.minRequired})`,
       };
     case "already-past-threshold":
-      return { value: "0", unit: "Days", sub: "Risk: High", subColor: "var(--clpa-critical)", sparkData, state: "matured", real: true };
+      return { value: "Due now", unit: "", sub: "Past replacement threshold", subColor: "var(--clpa-critical)", sparkData, state: "matured", real: true };
     case "stable":
       return { value: "Stable", unit: "", sub: stableLabel, subColor: "var(--clpa-muted)", sparkData, state: "matured", real: true };
     case "ok": {
@@ -2722,25 +2738,17 @@ function predictionToLifeDisplay(
 function AITopPredictionsCard() {
   const { thresholds } = useApp();
   const { data, connected } = useTelemetry();
-  // storageWearHistory/batteryHealthHistory now only feed the sparkline visual below (still a
-  // genuinely real, separately-recorded history) - the headline prediction numbers come from
-  // ai-service's real regression instead (data.predictions, surfaced by telemetry-server.mjs at
-  // most once per real calendar day - see useTelemetry's own MetricPrediction comment).
   const { storageWearHistory, batteryHealthHistory } = useTrendHistory(data, connected);
   const predictions = connected ? data?.predictions ?? null : null;
 
-  // SSD wear (SMART percentage_used, 0-100) projected forward to the real ai-service threshold
-  // (90% - see ai-service/app.py's own comment on why that number specifically).
   const ssdSpark = storageWearHistory.length > 0 ? storageWearHistory.slice(-10).map((p) => p.value) : [];
   const ssdPrediction = predictionToLifeDisplay(predictions?.ssd ?? null, ssdSpark, "No extra wear");
 
-  // 80% remaining health is the task's own real, disclosed threshold (a widely-cited industry
-  // rule of thumb for when a lithium-ion battery is considered meaningfully degraded) - not a
-  // hard technical cutoff, just the assumption ai-service's real projection is built on.
   const batterySpark = batteryHealthHistory.length > 0 ? batteryHealthHistory.slice(-10).map((p) => p.value) : [];
   const batteryPrediction = predictionToLifeDisplay(predictions?.battery ?? null, batterySpark, "No decline detected");
+  const batteryHealthPct = getBatteryHealthPercent(data, connected);
   const batteryHealthColor = colorForHealthPercent(
-    getBatteryHealthPercent(data, connected),
+    batteryHealthPct,
     thresholds.batteryHealthWarning,
     thresholds.batteryHealthCritical,
   );
@@ -2749,61 +2757,79 @@ function AITopPredictionsCard() {
       ? batteryPrediction.subColor
       : batteryHealthColor;
 
-  // Real per-core throttle margin (LibreHardwareMonitor's "Distance to TjMax", the worst/
-  // minimum core - see telemetry-server.mjs's own comment on why the minimum, not an average).
-  // null when LHM isn't reachable or doesn't expose this sensor on this hardware, same
-  // graceful-degradation convention as every other hardwareMonitor field.
   const cpuMinDistanceToTjMaxC = connected ? data?.hardwareMonitor?.cpuMinDistanceToTjMaxC ?? null : null;
   const thermalRiskReal = cpuMinDistanceToTjMaxC != null;
   const thermalRisk = thermalRiskReal ? thermalRiskFromMargin(cpuMinDistanceToTjMaxC) : null;
-
   const cpuLoad = getCpuLoad(data, connected);
-  const thermalSpark: number[] = [];
+
+  const ssdBar =
+    ssdPrediction.value === "Due now" ? 100
+    : ssdPrediction.value === "Stable" ? 12
+    : ssdPrediction.sub.startsWith("Risk: High") ? 88
+    : ssdPrediction.sub.startsWith("Risk: Medium") ? 55
+    : ssdPrediction.real && ssdPrediction.state === "matured" ? 22
+    : 0;
+  const batteryBar =
+    batteryPrediction.value === "Due now" || batteryPrediction.value === "0" ? 100
+    : batteryHealthPct != null ? Math.max(0, 100 - batteryHealthPct)
+    : batteryPrediction.sub.startsWith("Risk: High") ? 90
+    : batteryPrediction.sub.startsWith("Risk: Medium") ? 55
+    : 0;
 
   const preds = [
     {
-      label: "SSD Remaining Life",
+      label: "SSD remaining life",
+      kind: "Forecast",
       ...ssdPrediction,
-      sample: !ssdPrediction.real,
-      icon: <HardDrive size={12} style={{ color: "var(--clpa-cyan-bright)" }} strokeWidth={2} />,
-      iconBg: "rgba(var(--clpa-cyan-bright-rgb),0.1)",
+      icon: <HardDrive size={14} style={{ color: "var(--clpa-cyan-bright)" }} strokeWidth={2} />,
+      iconBg: "rgba(var(--clpa-cyan-bright-rgb),0.12)",
       data: ssdPrediction.sparkData,
-      sparkColor: "var(--clpa-success-bright)",
+      sparkColor: "var(--clpa-cyan-bright)",
+      bar: ssdBar,
+      barColor: ssdPrediction.subColor === "var(--clpa-critical)" ? "var(--clpa-critical)" : "var(--clpa-cyan-bright)",
     },
     {
-      label: "Battery Remaining Life",
+      label: "Battery remaining life",
+      kind: "Forecast",
       ...batteryPrediction,
-      sample: !batteryPrediction.real,
       valueColor: batteryPredAccent,
-      icon: <Battery size={12} style={{ color: batteryPredAccent }} strokeWidth={2} />,
-      iconBg: "rgba(var(--clpa-warning-bright-rgb),0.1)",
+      icon: <Battery size={14} style={{ color: batteryPredAccent }} strokeWidth={2} />,
+      iconBg: "rgba(var(--clpa-warning-bright-rgb),0.12)",
       data: batteryPrediction.sparkData,
       sparkColor: batteryPredAccent,
+      bar: batteryBar,
+      barColor: batteryPredAccent,
     },
     {
-      label: "CPU Load",
+      label: "CPU load",
+      kind: "Live",
       value: cpuLoad != null ? String(cpuLoad) : "—",
       unit: cpuLoad != null ? "%" : "",
-      sub: cpuLoad == null ? "Unknown" : cpuLoad >= 90 ? "High" : cpuLoad >= 70 ? "Elevated" : "Normal",
-      subColor: cpuLoad == null ? "var(--clpa-subtle)" : cpuLoad >= 90 ? "var(--clpa-critical)" : cpuLoad >= 70 ? "var(--clpa-warning)" : "var(--clpa-muted)",
-      sample: cpuLoad == null,
-      icon: <Cpu size={12} style={{ color: "var(--clpa-primary)" }} strokeWidth={2} />,
-      iconBg: "rgba(var(--clpa-primary-rgb),0.1)",
+      sub: cpuLoad == null ? "No reading" : cpuLoad >= 90 ? "High" : cpuLoad >= 70 ? "Elevated" : "Normal",
+      subColor: cpuLoad == null ? "var(--clpa-subtle)" : cpuLoad >= 90 ? "var(--clpa-critical)" : cpuLoad >= 70 ? "var(--clpa-warning)" : "var(--clpa-success)",
+      real: cpuLoad != null,
+      icon: <Cpu size={14} style={{ color: "var(--clpa-primary)" }} strokeWidth={2} />,
+      iconBg: "rgba(var(--clpa-primary-rgb),0.12)",
       data: [] as number[],
       sparkColor: "var(--clpa-primary)",
+      bar: cpuLoad ?? 0,
+      barColor: cpuLoad == null ? "var(--clpa-track)" : cpuLoad >= 90 ? "var(--clpa-critical)" : cpuLoad >= 70 ? "var(--clpa-warning)" : "var(--clpa-primary)",
     },
     {
-      label: "Thermal Risk",
+      label: "Thermal risk",
+      kind: "Live",
       value: thermalRisk ? thermalRisk.label : "—",
       unit: "",
       valueColor: thermalRisk ? thermalRisk.color : "var(--clpa-muted)",
       sub: thermalRiskReal ? `${Math.round(cpuMinDistanceToTjMaxC!)}°C to throttle` : "No TjMax sensor",
       subColor: "var(--clpa-subtle)",
-      sample: !thermalRiskReal,
-      icon: <Thermometer size={12} style={{ color: "var(--clpa-warning-bright)" }} strokeWidth={2} />,
-      iconBg: "rgba(var(--clpa-warning-bright-rgb),0.1)",
-      data: thermalSpark,
+      real: thermalRiskReal,
+      icon: <Thermometer size={14} style={{ color: "var(--clpa-warning-bright)" }} strokeWidth={2} />,
+      iconBg: "rgba(var(--clpa-warning-bright-rgb),0.12)",
+      data: [] as number[],
       sparkColor: "var(--clpa-warning-bright)",
+      bar: thermalRiskReal ? Math.max(8, Math.min(100, Math.round((40 - cpuMinDistanceToTjMaxC!) * 2.5))) : 0,
+      barColor: thermalRisk ? thermalRisk.color : "var(--clpa-track)",
     },
   ];
 
@@ -2811,30 +2837,49 @@ function AITopPredictionsCard() {
     <AICard style={{ padding: "12px 14px 10px" }}>
       <AIHeader
         title="TOP PREDICTIONS"
-        tooltip="SSD and Battery remaining life from the AI service. CPU Load and Thermal Risk from live sensors."
+        tooltip="SSD and Battery remaining life from the AI service. CPU load and thermal margin from live sensors."
       />
-      <div className="grid gap-2 flex-1 min-h-0" style={{ gridTemplateColumns: "1fr 1fr", gridAutoRows: "1fr" }}>
-        {preds.map((p, i) => (
-          <div key={i} className="rounded-xl p-2.5 flex flex-col justify-between min-h-0" style={{ background: "var(--clpa-card)", border: "1px solid var(--clpa-surface-border)" }}>
-            <div className="flex items-center gap-1.5 mb-1.5">
-              <div style={{ background: p.iconBg, borderRadius: 6, padding: 4 }}>{p.icon}</div>
-              <span style={{ fontSize: 9, color: "var(--clpa-muted)", fontWeight: 500 }}>{p.label}</span>
-            </div>
-            <div className="flex items-end justify-between">
-              <div>
-                <div className="flex items-center gap-1">
-                  <div style={{ fontSize: p.value.length > 4 ? 15 : 19, fontWeight: 800, color: p.valueColor ?? "var(--clpa-title)", lineHeight: 1 }}>
-                    {p.value}
-                    {p.unit && <span style={{ fontSize: 10, color: "var(--clpa-subtle)", fontWeight: 500, marginLeft: 3 }}>{p.unit}</span>}
-                  </div>
-                  {p.sample && <SampleTag />}
+      <div className="flex flex-col gap-2 flex-1 min-h-0">
+        {preds.map((p) => (
+          <div
+            key={p.label}
+            className="rounded-xl flex flex-col gap-1.5 min-w-0"
+            style={{ background: "var(--clpa-surface)", border: "1px solid var(--clpa-surface-border)", padding: "9px 10px" }}
+          >
+            <div className="flex items-center gap-2 min-w-0">
+              <div className="flex items-center justify-center rounded-lg flex-shrink-0" style={{ width: 28, height: 28, background: p.iconBg }}>
+                {p.icon}
+              </div>
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center justify-between gap-2">
+                  <span style={{ fontSize: 10, color: "var(--clpa-muted)", fontWeight: 600 }}>{p.label}</span>
+                  <span
+                    style={{
+                      fontSize: 8,
+                      fontWeight: 700,
+                      letterSpacing: 0.3,
+                      color: p.kind === "Forecast" ? "var(--clpa-accent)" : "var(--clpa-primary)",
+                      background: p.kind === "Forecast" ? "rgba(var(--clpa-accent-rgb),0.1)" : "rgba(var(--clpa-primary-rgb),0.1)",
+                      borderRadius: 4,
+                      padding: "1px 6px",
+                      flexShrink: 0,
+                    }}
+                  >
+                    {p.kind}
+                  </span>
                 </div>
-                <div className="flex items-center gap-1" style={{ marginTop: 4 }}>
-                  <span style={{ fontSize: 9, fontWeight: 600, color: p.subColor, display: "inline-block" }}>{p.sub}</span>
-                  {p.sample && <SampleTag />}
+                <div className="flex items-baseline gap-1.5 min-w-0" style={{ marginTop: 2 }}>
+                  <span style={{ fontSize: 16, fontWeight: 800, color: p.valueColor ?? "var(--clpa-title)", lineHeight: 1, whiteSpace: "nowrap" }}>
+                    {p.value}
+                    {p.unit ? <span style={{ fontSize: 10, color: "var(--clpa-subtle)", fontWeight: 600, marginLeft: 3 }}>{p.unit}</span> : null}
+                  </span>
+                  <span style={{ fontSize: 9.5, fontWeight: 600, color: p.subColor, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.sub}</span>
                 </div>
               </div>
-              {p.data.length > 1 && <AISparkline data={p.data} color={p.sparkColor} w={46} h={26} />}
+              {p.data.length > 1 && <AISparkline data={p.data} color={p.sparkColor} w={52} h={22} />}
+            </div>
+            <div className="w-full rounded-full overflow-hidden" style={{ height: 4, background: "var(--clpa-divider)" }}>
+              <div style={{ width: `${Math.min(100, Math.max(0, p.bar))}%`, height: "100%", background: p.barColor, borderRadius: 4 }} />
             </div>
           </div>
         ))}
@@ -2906,18 +2951,24 @@ function AIRiskOverviewCard() {
         <span style={{ fontSize: 11, fontWeight: 800, color: "var(--clpa-title)", letterSpacing: 0.4 }}>RISK OVERVIEW</span>
         <AIInfo text={batteryHealthPct != null ? `Battery wear is 100 − health. Health is ${batteryHealthPct}% on Dashboard, Hardware, and Health Score.` : "Hardware = inverted performance. Battery wear = 100 − health. SSD = SMART wear. Security = TPM, Secure Boot, BitLocker."} />
       </div>
-      <div className="flex flex-col flex-1 justify-evenly min-h-0">
+      <div className="flex flex-col flex-1 justify-evenly min-h-0 gap-2">
         {rows.map((b, i) => (
-          <div key={i} className="flex items-center gap-2">
-            <b.Icon size={13} style={{ color: b.iconColor }} strokeWidth={2} />
-            <span style={{ fontSize: 10, color: "var(--clpa-body)", fontWeight: 500, width: 78, flexShrink: 0 }}>{b.label}</span>
-            <div className="flex-shrink-0 rounded-md px-1.5 py-px" style={{ background: b.riskBg }}>
-              <span style={{ fontSize: 8, fontWeight: 700, color: b.riskColor, whiteSpace: "nowrap" }}>{b.risk}</span>
+          <div key={i} className="flex items-center gap-2 rounded-xl" style={{ background: "var(--clpa-surface)", border: "1px solid var(--clpa-surface-border)", padding: "8px 10px" }}>
+            <div className="flex items-center justify-center rounded-lg flex-shrink-0" style={{ width: 26, height: 26, background: b.riskBg }}>
+              <b.Icon size={13} style={{ color: b.iconColor }} strokeWidth={2} />
             </div>
-            <div className="flex-1 rounded-full overflow-hidden" style={{ height: 5, background: "var(--clpa-divider)" }}>
-              <div style={{ width: b.sample ? "0%" : b.pct === 0 ? "4%" : `${b.pct}%`, height: "100%", background: b.barColor, borderRadius: 4, opacity: b.sample || b.pct === 0 ? 0.4 : 1 }} />
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center justify-between gap-2 mb-1">
+                <span style={{ fontSize: 11, color: "var(--clpa-title)", fontWeight: 700 }}>{b.label}</span>
+                <span style={{ fontSize: 8, fontWeight: 700, color: b.riskColor, background: b.riskBg, borderRadius: 4, padding: "1px 6px", whiteSpace: "nowrap" }}>{b.risk}</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <div className="flex-1 rounded-full overflow-hidden" style={{ height: 5, background: "var(--clpa-divider)" }}>
+                  <div style={{ width: b.sample ? "0%" : b.pct === 0 ? "4%" : `${Math.min(100, b.pct)}%`, height: "100%", background: b.barColor, borderRadius: 4, opacity: b.sample || b.pct === 0 ? 0.4 : 1 }} />
+                </div>
+                <span style={{ fontSize: 11, fontWeight: 700, color: "var(--clpa-body)", width: 32, textAlign: "right", flexShrink: 0 }}>{b.sample ? "—" : `${b.pct}%`}</span>
+              </div>
             </div>
-            <span style={{ fontSize: 10, fontWeight: 700, color: "var(--clpa-body)", width: 26, textAlign: "right", flexShrink: 0 }}>{b.sample ? "—" : `${b.pct}%`}</span>
           </div>
         ))}
       </div>
@@ -3047,8 +3098,8 @@ function AIRiskLevelCard() {
 // True once a prediction's projection has landed in the Medium/High risk tier (covers both a
 // normal numeric projection and the "already past threshold" 0-days case) - the bar for
 // actually surfacing a recommendation about it, not just any real number.
-function isElevatedRisk(prediction: { sub: string }): boolean {
-  return prediction.sub === "Risk: Medium" || prediction.sub === "Risk: High";
+function isElevatedRisk(prediction: { sub: string; value: string }): boolean {
+  return prediction.sub === "Risk: Medium" || prediction.sub === "Risk: High" || prediction.value === "Due now" || prediction.value === "0";
 }
 
 function AIRecommendationsCard() {
@@ -3065,13 +3116,13 @@ function AIRecommendationsCard() {
     wait: { icon: <Activity size={15} color="var(--clpa-muted)" strokeWidth={2} />, iconBg: "rgba(var(--clpa-subtle-rgb),0.1)", iconBorder: "var(--clpa-surface-border)", titleColor: "var(--clpa-muted)" },
   };
 
-  type Rec = { icon: React.ReactNode; iconBg: string; iconBorder: string; title: string; titleColor: string; desc: string };
+  type Rec = { icon: React.ReactNode; iconBg: string; iconBorder: string; title: string; titleColor: string; desc: string; priority: string };
   const recs: Rec[] = [];
 
   const security = getSecurityCompliance(data, connected);
   const batteryPastThreshold = batteryHealthPct != null && batteryHealthPct < 80;
-  const batteryPredElevated = batteryPrediction.real && (isElevatedRisk(batteryPrediction) || batteryPrediction.value === "0");
-  const ssdPredElevated = ssdPrediction.real && (isElevatedRisk(ssdPrediction) || ssdPrediction.value === "0");
+  const batteryPredElevated = batteryPrediction.real && isElevatedRisk(batteryPrediction);
+  const ssdPredElevated = ssdPrediction.real && isElevatedRisk(ssdPrediction);
 
   if (security.real && !security.ok) {
     recs.push({
@@ -3081,24 +3132,35 @@ function AIRecommendationsCard() {
       titleColor: "var(--clpa-warning)",
       title: "Security Hardening",
       desc: describeSecuritySignals(data, connected),
+      priority: "High",
     });
   }
 
   if (batteryPastThreshold || batteryPredElevated) {
     const desc = batteryPastThreshold
       ? `Health is ${batteryHealthPct}% (replace below 80%).`
-      : batteryPrediction.value === "0"
+      : batteryPrediction.value === "Due now" || batteryPrediction.value === "0"
       ? "Already below 80% health."
       : `Drops below 80% in ~${batteryPrediction.value} days.`;
-    recs.push({ ...recIcon.battery, title: "Battery Replacement", desc });
+    recs.push({
+      ...recIcon.battery,
+      title: "Battery Replacement",
+      desc,
+      priority: batteryPastThreshold || batteryPrediction.value === "Due now" ? "High" : "Medium",
+    });
   }
 
   if (ssdPredElevated) {
     const desc =
-      ssdPrediction.value === "0"
+      ssdPrediction.value === "Due now" || ssdPrediction.value === "0"
         ? "SSD at rated wear."
         : `~${ssdPrediction.value} days to rated wear.`;
-    recs.push({ ...recIcon.ssd, title: "Storage Replacement", desc });
+    recs.push({
+      ...recIcon.ssd,
+      title: "Storage Replacement",
+      desc,
+      priority: ssdPrediction.value === "Due now" || ssdPrediction.sub === "Risk: High" ? "High" : "Medium",
+    });
   }
 
   if (recs.length === 0) {
@@ -3109,9 +3171,9 @@ function AIRecommendationsCard() {
       !isElevatedRisk(batteryPrediction);
     const batteryOkLive = batteryHealthPct != null && batteryHealthPct >= 80;
     if (bothMaturedStable || (batteryOkLive && !ssdPredElevated && ssdPrediction.state === "matured")) {
-      recs.push({ ...recIcon.ok, title: "Keep Monitoring", desc: "No action needed." });
+      recs.push({ ...recIcon.ok, title: "Keep Monitoring", desc: "No action needed.", priority: "OK" });
     } else {
-      recs.push({ ...recIcon.wait, title: "Not Enough History", desc: "Still collecting daily samples." });
+      recs.push({ ...recIcon.wait, title: "Not Enough History", desc: "Still collecting daily samples.", priority: "Info" });
     }
   }
 
@@ -3122,21 +3184,34 @@ function AIRecommendationsCard() {
         tooltip="Each item is a live action from battery health, security posture, or the AI remaining-life service. Nothing here is an example."
       />
       <div className="flex flex-col gap-2 flex-1 min-h-0">
-        {recs.map((r, i) => (
-          <div key={i} className="rounded-xl p-2.5" style={{ background: "var(--clpa-surface)", border: "1px solid var(--clpa-surface-border)" }}>
-            <div className="flex items-center gap-2.5">
-              <div className="flex items-center justify-center rounded-xl flex-shrink-0" style={{ width: 30, height: 30, background: r.iconBg, border: `1px solid ${r.iconBorder}` }}>
-                {r.icon}
-              </div>
-              <div className="flex-1 min-w-0">
-                <div style={{ fontSize: 11.5, fontWeight: 700, color: r.titleColor, marginBottom: 2 }}>{r.title}</div>
-                <div style={{ fontSize: 9.5, color: "var(--clpa-muted)", lineHeight: 1.35, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                  {r.desc}
+        {recs.map((r, i) => {
+          const priColor =
+            r.priority === "High" ? "var(--clpa-critical)"
+            : r.priority === "Medium" ? "var(--clpa-warning)"
+            : r.priority === "OK" ? "var(--clpa-success)"
+            : "var(--clpa-muted)";
+          const priBg =
+            r.priority === "High" ? "rgba(var(--clpa-critical-bright-rgb),0.12)"
+            : r.priority === "Medium" ? "rgba(var(--clpa-warning-bright-rgb),0.12)"
+            : r.priority === "OK" ? "rgba(var(--clpa-success-bright-rgb),0.12)"
+            : "rgba(var(--clpa-subtle-rgb),0.1)";
+          return (
+            <div key={i} className="rounded-xl p-2.5" style={{ background: "var(--clpa-surface)", border: "1px solid var(--clpa-surface-border)" }}>
+              <div className="flex items-start gap-2.5">
+                <div className="flex items-center justify-center rounded-xl flex-shrink-0" style={{ width: 30, height: 30, background: r.iconBg, border: `1px solid ${r.iconBorder}` }}>
+                  {r.icon}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center justify-between gap-2 mb-1">
+                    <div style={{ fontSize: 11.5, fontWeight: 700, color: r.titleColor }}>{r.title}</div>
+                    <span style={{ fontSize: 8, fontWeight: 700, color: priColor, background: priBg, borderRadius: 4, padding: "1px 6px", flexShrink: 0 }}>{r.priority}</span>
+                  </div>
+                  <div style={{ fontSize: 10, color: "var(--clpa-muted)", lineHeight: 1.4 }}>{r.desc}</div>
                 </div>
               </div>
             </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
 
       <div className="flex items-center gap-1.5" style={{ marginTop: "auto", paddingTop: 10 }}>
@@ -3239,18 +3314,33 @@ function formatEventLine(message: string): string {
     .trim();
 }
 
+function dedupeRecentEvents(events: EventHistoryItem[], max: number): EventHistoryItem[] {
+  const seen = new Set<string>();
+  const out: EventHistoryItem[] = [];
+  for (const ev of events) {
+    const minute = ev.createdAt.length >= 16 ? ev.createdAt.slice(0, 16) : ev.createdAt;
+    const key = `${ev.eventType}|${formatEventLine(ev.message)}|${minute}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(ev);
+    if (out.length >= max) break;
+  }
+  return out;
+}
+
 // ─── AI Timeline Card ─────────────────────────────────────
 function AITimelineCard() {
-  const { events, loading, error } = useEventHistory(5);
+  const { events, loading, error } = useEventHistory(20);
+  const unique = dedupeRecentEvents(events, 5);
 
   return (
     <AICard style={{ padding: "10px 12px 8px", display: "flex", flexDirection: "column", gridColumn: "1 / 3" }}>
       <AIHeader
         title="AI TIMELINE"
-        tooltip="Each entry is a real device event this agent logged — connectivity, hardware monitor, alerts, and remediations. Newest on the right."
+        tooltip="Chronological event log from this agent — alerts, thermal trips, and connection changes. Newest on the right. Insights on the right is a live reading of sensors, not this list."
       />
 
-      {events.length === 0 ? (
+      {unique.length === 0 ? (
         <div className="flex-1 flex items-center justify-center" style={{ minHeight: 56 }}>
           <span style={{ fontSize: 10.5, color: "var(--clpa-subtle)" }}>
             {loading ? "Loading real event history…" : error ? "Couldn't load event history - local agent/backend unreachable." : "No events recorded yet."}
@@ -3258,11 +3348,10 @@ function AITimelineCard() {
         </div>
       ) : (
         <>
-          {/* Timeline row - real history, most recent 5 events, oldest to newest left to right. */}
           <div className="relative mt-1 flex-1 min-h-0">
             <div style={{ position: "absolute", top: 11, left: 24, right: 24, height: 2, background: "var(--clpa-input-border)", borderRadius: 2 }} />
             <div className="flex items-start justify-between gap-1.5">
-              {[...events].reverse().map((ev) => {
+              {[...unique].reverse().map((ev) => {
                 const { Icon, color, bg } = iconForEvent(ev.eventType, ev.severity);
                 const tag = tagForEvent(ev.eventType, ev.severity);
                 const line = formatEventLine(ev.message);
@@ -3271,9 +3360,9 @@ function AITimelineCard() {
                     <div className="flex items-center justify-center rounded-full mb-1" style={{ width: 22, height: 22, background: bg, border: `1.5px solid ${color}30`, boxShadow: `0 0 0 3px ${color}0D`, zIndex: 1 }}>
                       <Icon size={11} color={color} strokeWidth={2} />
                     </div>
-                    <div className="flex flex-col items-center rounded-lg w-full" style={{ background: "var(--clpa-surface)", border: "1px solid var(--clpa-surface-border)", padding: "4px 4px 3px", minWidth: 0 }}>
-                      <span title={ev.message} style={{ fontSize: 8.5, color: "var(--clpa-body-alt)", fontWeight: 600, lineHeight: 1.2, textAlign: "center", width: "100%", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{line}</span>
-                      <span style={{ fontSize: 7.5, fontWeight: 700, color, marginTop: 2, whiteSpace: "nowrap" }}>{tag} · {formatRelativeTime(ev.createdAt)}</span>
+                    <div className="flex flex-col items-center rounded-lg w-full" style={{ background: "var(--clpa-surface)", border: "1px solid var(--clpa-surface-border)", padding: "6px 6px 5px", minWidth: 0 }}>
+                      <span title={ev.message} style={{ fontSize: 9, color: "var(--clpa-body-alt)", fontWeight: 600, lineHeight: 1.25, textAlign: "center", width: "100%", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>{line}</span>
+                      <span style={{ fontSize: 8, fontWeight: 700, color, marginTop: 3, whiteSpace: "nowrap" }}>{tag} · {formatRelativeTime(ev.createdAt)}</span>
                     </div>
                   </div>
                 );
@@ -3281,13 +3370,11 @@ function AITimelineCard() {
             </div>
           </div>
 
-          {/* Real footer - a count of what's actually shown, not a fabricated forecast/
-              confidence figure (no predictive model exists anywhere in this project). */}
           <div className="flex items-center justify-between" style={{ borderTop: "1px solid var(--clpa-divider)", paddingTop: 6, marginTop: "auto" }}>
             <div className="flex items-center gap-1.5">
               <Brain size={12} style={{ color: "var(--clpa-accent)" }} strokeWidth={2} />
               <span style={{ fontSize: 9, color: "var(--clpa-muted)", fontWeight: 500 }}>
-                {events.length} most recent real event{events.length === 1 ? "" : "s"}
+                Event log · {unique.length} recent
               </span>
             </div>
           </div>
@@ -3297,39 +3384,153 @@ function AITimelineCard() {
   );
 }
 
-// ─── AI Insights Card ─────────────────────────────────────
+function insightTone(tone: "ok" | "warn" | "crit" | "info") {
+  if (tone === "crit") return { color: "var(--clpa-critical)", bg: "rgba(var(--clpa-critical-bright-rgb),0.1)" };
+  if (tone === "warn") return { color: "var(--clpa-warning)", bg: "rgba(var(--clpa-warning-bright-rgb),0.12)" };
+  if (tone === "ok") return { color: "var(--clpa-success)", bg: "rgba(var(--clpa-success-bright-rgb),0.1)" };
+  return { color: "var(--clpa-primary)", bg: "rgba(var(--clpa-primary-rgb),0.1)" };
+}
+
 function AIInsightsCard() {
-  const { events, loading, error } = useEventHistory(4);
+  const { thresholds } = useApp();
+  const { data, connected } = useTelemetry();
+  const { events } = useEventHistory(20);
+  const { batteryHealthHistory } = useTrendHistory(data, connected);
+  const batteryDelta = computeScoreDelta(batteryHealthHistory);
+
+  type InsightRow = { id: string; title: string; body: string; tone: "ok" | "warn" | "crit" | "info"; Icon: typeof Battery };
+  const rows: InsightRow[] = [];
+
+  const batteryHealthPct = getBatteryHealthPercent(data, connected);
+  if (batteryHealthPct != null) {
+    const pastReplace = batteryHealthPct < 80;
+    const crit = batteryHealthPct < thresholds.batteryHealthCritical;
+    const trend =
+      batteryDelta != null && batteryDelta.delta !== 0
+        ? ` ${batteryDelta.delta >= 0 ? "+" : ""}${batteryDelta.delta} pts vs ${batteryDelta.daysAgo === 1 ? "yesterday" : `${batteryDelta.daysAgo} days ago`}.`
+        : "";
+    rows.push({
+      id: "battery",
+      title: pastReplace ? "Battery past replacement line" : "Battery within design range",
+      body: `${batteryHealthPct}% of design capacity.${pastReplace ? " Replace below 80%." : ""}${trend}`,
+      tone: crit ? "crit" : pastReplace ? "warn" : "ok",
+      Icon: Battery,
+    });
+  }
+
+  const security = getSecurityCompliance(data, connected);
+  if (security.real) {
+    rows.push({
+      id: "security",
+      title: security.ok ? "Firmware checks passing" : "Firmware checks incomplete",
+      body: describeSecuritySignals(data, connected),
+      tone: security.ok ? "ok" : "warn",
+      Icon: Shield,
+    });
+  }
+
+  const volumes = listLogicalVolumes(data, connected);
+  let fullest: (typeof volumes)[number] | null = null;
+  let fullestPct: number | null = null;
+  for (const vol of volumes) {
+    const pct = logicalVolumeUsedPct(vol);
+    if (pct != null && (fullestPct == null || pct > fullestPct)) {
+      fullest = vol;
+      fullestPct = pct;
+    }
+  }
+  if (fullest && fullestPct != null && fullestPct >= STORAGE_USAGE_WARNING_PCT) {
+    const letter = fullest.DeviceID?.replace(/\\$/, "") || "Volume";
+    rows.push({
+      id: "disk",
+      title: `${letter} is ${Math.round(fullestPct)}% full`,
+      body: fullestPct >= STORAGE_USAGE_CRITICAL_PCT ? "Free space is critically low." : "Free space is below the 85% warning line.",
+      tone: fullestPct >= STORAGE_USAGE_CRITICAL_PCT ? "crit" : "warn",
+      Icon: HardDrive,
+    });
+  } else {
+    const wear = getStorageWearPercent(data, connected);
+    if (wear != null) {
+      rows.push({
+        id: "ssd",
+        title: wear >= 90 ? "SSD near rated wear" : "SSD wear is low",
+        body: `SMART percentage used is ${wear}%.`,
+        tone: wear >= 90 ? "crit" : wear >= 50 ? "warn" : "ok",
+        Icon: HardDrive,
+      });
+    }
+  }
+
+  const cpuTempC = connected ? data?.hardwareMonitor?.cpuTempC ?? null : null;
+  const marginC = connected ? data?.hardwareMonitor?.cpuMinDistanceToTjMaxC ?? null : null;
+  if (cpuTempC != null || marginC != null) {
+    const hot = cpuTempC != null && cpuTempC >= thresholds.cpuTempWarning;
+    const thermal = marginC != null ? thermalRiskFromMargin(marginC) : null;
+    const bits = [
+      cpuTempC != null ? `CPU ${Math.round(cpuTempC)}°C` : null,
+      marginC != null ? `${Math.round(marginC)}°C to throttle` : null,
+    ].filter(Boolean);
+    rows.push({
+      id: "thermal",
+      title: hot ? "CPU temperature elevated" : thermal && thermal.label !== "Low" ? `Thermal risk ${thermal.label.toLowerCase()}` : "Thermals in range",
+      body: bits.join(" · "),
+      tone: hot || (thermal && thermal.label === "High") ? "crit" : thermal && thermal.label === "Moderate" ? "warn" : "ok",
+      Icon: Thermometer,
+    });
+  }
+
+  const hourAgo = Date.now() - 60 * 60 * 1000;
+  const lastHour = events.filter((ev) => {
+    const t = new Date(ev.createdAt).getTime();
+    return Number.isFinite(t) && t >= hourAgo;
+  });
+  const thermalHour = lastHour.filter((ev) => ev.eventType.includes("cpu-temp"));
+  if (thermalHour.length >= 2) {
+    rows.push({
+      id: "thermal-hour",
+      title: `${thermalHour.length} CPU temp events in the last hour`,
+      body: "See Timeline for each trip and recovery.",
+      tone: "warn",
+      Icon: Activity,
+    });
+  }
+
+  const shown = rows.slice(0, 4);
 
   return (
-    <AICard style={{ padding: "10px 12px 6px" }}>
+    <AICard style={{ padding: "10px 12px 8px" }}>
       <AIHeader
         title="AI INSIGHTS"
-        tooltip="The same live event log as Timeline, listed with what changed and when."
+        tooltip="Live reading of battery, security, storage, and thermals right now. Timeline is the event log; this card is not a second copy of it."
       />
-      {events.length === 0 ? (
+      {shown.length === 0 ? (
         <div className="flex-1 flex items-center justify-center" style={{ minHeight: 56 }}>
           <span style={{ fontSize: 10.5, color: "var(--clpa-subtle)" }}>
-            {loading ? "Loading real event history…" : error ? "Couldn't load event history - local agent/backend unreachable." : "No events recorded yet."}
+            {connected ? "Waiting on live sensors." : "Agent offline."}
           </span>
         </div>
       ) : (
-        <div className="flex flex-col flex-1 min-h-0 justify-evenly">
-          {events.map((ev, i) => {
-            const { Icon, color, bg } = iconForEvent(ev.eventType, ev.severity);
-            const line = formatEventLine(ev.message);
+        <div className="flex flex-col gap-1.5 flex-1 min-h-0">
+          {shown.map((row) => {
+            const { color, bg } = insightTone(row.tone);
             return (
-              <div key={ev.id} className="flex items-center gap-2 py-1" style={{ borderBottom: i < events.length - 1 ? "1px solid var(--clpa-divider)" : "none" }}>
-                <div className="flex items-center justify-center rounded-md flex-shrink-0" style={{ width: 22, height: 22, background: bg }}>
-                  <Icon size={11} color={color} strokeWidth={2} />
+              <div key={row.id} className="flex items-start gap-2 rounded-xl" style={{ background: "var(--clpa-surface)", border: "1px solid var(--clpa-surface-border)", padding: "8px 9px" }}>
+                <div className="flex items-center justify-center rounded-md flex-shrink-0" style={{ width: 22, height: 22, background: bg, marginTop: 1 }}>
+                  <row.Icon size={11} color={color} strokeWidth={2} />
                 </div>
-                <span title={ev.message} style={{ fontSize: 10.5, fontWeight: 600, color: "var(--clpa-body)", lineHeight: 1.2, flex: 1, minWidth: 0, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{line}</span>
-                <span style={{ fontSize: 8.5, color: "var(--clpa-subtle)", flexShrink: 0, whiteSpace: "nowrap" }}>{formatRelativeTime(ev.createdAt)}</span>
+                <div className="min-w-0 flex-1">
+                  <div style={{ fontSize: 10.5, fontWeight: 700, color: "var(--clpa-title)", lineHeight: 1.25 }}>{row.title}</div>
+                  <div style={{ fontSize: 9.5, color: "var(--clpa-muted)", lineHeight: 1.35, marginTop: 2 }}>{row.body}</div>
+                </div>
               </div>
             );
           })}
         </div>
       )}
+      <div className="flex items-center gap-1.5" style={{ borderTop: "1px solid var(--clpa-divider)", paddingTop: 6, marginTop: "auto" }}>
+        <Brain size={12} style={{ color: "var(--clpa-accent)" }} strokeWidth={2} />
+        <span style={{ fontSize: 9, color: "var(--clpa-subtle)" }}>Live sensors now · not the event log</span>
+      </div>
     </AICard>
   );
 }
@@ -3527,19 +3728,19 @@ function HWIntegrityCard() {
   // Shared TPM check (src/app/lib/derived.ts) - Attestation is real whenever TPM data is
   // available at all: Passed if active, Failed if present but inactive.
   const { tpmReal, tpmActive } = getTpmStatus(data, connected);
-  const tpmAttestation = tpmReal ? (tpmActive ? "Passed" : "Failed") : "Passed";
-  const tpmOk = tpmAttestation === "Passed";
+  const tpmAttestation = tpmReal ? (tpmActive ? "Passed" : "Failed") : "Unknown";
+  const tpmOk = tpmReal && tpmActive;
 
   // Confirm-SecureBootUEFI - throws on legacy BIOS and can need elevation beyond what's already
   // guaranteed on some configurations; both cases fall back to null/sample the same way.
   const secureBootEnabled = connected ? data?.secureBootEnabled ?? null : null;
-  const secureBootLabel = secureBootEnabled != null ? (secureBootEnabled ? "Enabled" : "Disabled") : "Enabled";
-  const secureBootOk = secureBootLabel === "Enabled";
+  const secureBootLabel = secureBootEnabled != null ? (secureBootEnabled ? "Enabled" : "Disabled") : "Unknown";
+  const secureBootOk = secureBootEnabled === true;
 
   // Get-BitLockerVolume's ProtectionStatus ("On"/"Off") - null if the module is absent (e.g.
   // Windows Home) or the query otherwise fails.
   const bitlockerStatus = connected ? data?.bitlockerStatus ?? null : null;
-  const bitlockerLabel = bitlockerStatus != null ? (bitlockerStatus === "On" ? "Enabled" : "Disabled") : "Enabled";
+  const bitlockerLabel = bitlockerStatus != null ? (bitlockerStatus === "On" ? "Enabled" : "Disabled") : "Unknown";
 
   // Real Win32_PnPEntity presence check (get-telemetry.ps1) - "Present"/"Not Present" are both
   // real, fully determined facts (the same device-manager state Windows' own Sign-in options
@@ -3597,15 +3798,15 @@ function HWIntegrityCard() {
   // reads through a colored value (green pass / amber fail) rather than a separate tinted box,
   // so this card doesn't stack an unrelated green-or-amber block inside its teal theme.
   const rows = [
-    { label: "TPM Attestation", value: tpmAttestation, valueColor: tpmOk ? "var(--clpa-success)" : "var(--clpa-warning)", sample: !tpmReal },
-    { label: "Secure Boot", value: secureBootLabel, valueColor: secureBootOk ? "var(--clpa-success)" : "var(--clpa-warning)", sample: secureBootEnabled == null },
+    { label: "TPM Attestation", value: tpmAttestation, valueColor: !tpmReal ? "var(--clpa-muted)" : tpmOk ? "var(--clpa-success)" : "var(--clpa-warning)", sample: !tpmReal },
+    { label: "Secure Boot", value: secureBootLabel, valueColor: secureBootEnabled == null ? "var(--clpa-muted)" : secureBootOk ? "var(--clpa-success)" : "var(--clpa-warning)", sample: secureBootEnabled == null },
     { label: "Fingerprint", value: fingerprintLabel, sample: fingerprintPresent == null },
-    { label: "BitLocker", value: bitlockerLabel, sample: bitlockerStatus == null },
+    { label: "BitLocker", value: bitlockerLabel, valueColor: bitlockerStatus == null ? "var(--clpa-muted)" : bitlockerStatus === "On" ? "var(--clpa-success)" : "var(--clpa-warning)", sample: bitlockerStatus == null },
     { label: "Tamper Detection", value: tamperStatus, valueColor: tamperColor, sample: tamperSample },
     ...(hardwareIntegrity?.status === "mismatch" && hardwareIntegrity.mismatchedFields.length > 0
       ? [{ label: "Mismatched Fields", value: hardwareIntegrity.mismatchedFields.join(", "), valueColor: "var(--clpa-critical)", sample: false }]
       : []),
-    { label: "Last Validation", value: lastValidationLabel ?? "3 mins ago", muted: true, sample: lastValidationLabel == null },
+    { label: "Last Validation", value: lastValidationLabel ?? "—", muted: true, sample: lastValidationLabel == null },
   ];
 
   return (
@@ -4248,7 +4449,7 @@ function HWPerCoreVoltagesCard({ voltages }: { voltages: { label: string; volts:
 }
 
 function HWDriversCard() {
-  const { performAction, refreshSync } = useApp();
+  const { refreshSync } = useApp();
   const { data, connected } = useTelemetry();
 
   // Real per-device driver versions via Win32_PnPSignedDriver (get-telemetry.ps1), matched
@@ -4268,35 +4469,35 @@ function HWDriversCard() {
   const drivers = [
     {
       name: "BIOS", Icon: Settings, color: "var(--clpa-indigo)", bg: "rgba(var(--clpa-indigo-rgb),0.12)",
-      version: biosVersionReal ? `v${bios!.SMBIOSBIOSVersion}` : "v2.16.0", date: biosDate, sample: !biosVersionReal,
+      version: biosVersionReal ? `v${bios!.SMBIOSBIOSVersion}` : "—", date: biosDate, sample: !biosVersionReal,
     },
     {
       name: "Chipset", Icon: Cpu, color: "var(--clpa-primary)", bg: "rgba(var(--clpa-primary-rgb),0.12)",
-      version: dv?.chipset ? `v${dv.chipset.version}` : "v10.1.18836.8280", date: dv?.chipset ? formatWmiDate(dv.chipset.date) : null, sample: !dv?.chipset,
+      version: dv?.chipset ? `v${dv.chipset.version}` : "—", date: dv?.chipset ? formatWmiDate(dv.chipset.date) : null, sample: !dv?.chipset,
     },
     {
       name: "Intel ME", Icon: Server, color: "var(--clpa-muted)", bg: "rgba(var(--clpa-muted-rgb),0.12)",
-      version: dv?.intelMe ? `v${dv.intelMe.version}` : "v16.1.30.2361", date: dv?.intelMe ? formatWmiDate(dv.intelMe.date) : null, sample: !dv?.intelMe,
+      version: dv?.intelMe ? `v${dv.intelMe.version}` : "—", date: dv?.intelMe ? formatWmiDate(dv.intelMe.date) : null, sample: !dv?.intelMe,
     },
     {
       name: "WiFi Driver", Icon: Wifi, color: "var(--clpa-info-cyan)", bg: "rgba(var(--clpa-info-cyan-rgb),0.12)",
-      version: dv?.wifi ? `v${dv.wifi.version}` : "v23.80.1.1", date: dv?.wifi ? formatWmiDate(dv.wifi.date) : null, sample: !dv?.wifi,
+      version: dv?.wifi ? `v${dv.wifi.version}` : "—", date: dv?.wifi ? formatWmiDate(dv.wifi.date) : null, sample: !dv?.wifi,
     },
     {
       name: "GPU Driver", Icon: BarChart3, color: "var(--clpa-warning-bright)", bg: "rgba(var(--clpa-warning-bright-rgb),0.12)",
-      version: gpuDriverReal ? `v${getPrimaryGpu(data, connected)!.DriverVersion}` : "v31.0.101.5522", date: null, sample: !gpuDriverReal,
+      version: gpuDriverReal ? `v${getPrimaryGpu(data, connected)!.DriverVersion}` : "—", date: null, sample: !gpuDriverReal,
     },
     {
       name: "Audio Driver", Icon: Headphones, color: "var(--clpa-accent)", bg: "rgba(var(--clpa-accent-rgb),0.12)",
-      version: dv?.audio ? `v${dv.audio.version}` : "v6.0.9514.1", date: dv?.audio ? formatWmiDate(dv.audio.date) : null, sample: !dv?.audio,
+      version: dv?.audio ? `v${dv.audio.version}` : "—", date: dv?.audio ? formatWmiDate(dv.audio.date) : null, sample: !dv?.audio,
     },
     {
       name: "Bluetooth Driver", Icon: Radio, color: "var(--clpa-info-teal)", bg: "rgba(var(--clpa-info-teal-rgb),0.12)",
-      version: dv?.bluetooth ? `v${dv.bluetooth.version}` : "v22.120.0.3", date: dv?.bluetooth ? formatWmiDate(dv.bluetooth.date) : null, sample: !dv?.bluetooth,
+      version: dv?.bluetooth ? `v${dv.bluetooth.version}` : "—", date: dv?.bluetooth ? formatWmiDate(dv.bluetooth.date) : null, sample: !dv?.bluetooth,
     },
     {
       name: "SSD Firmware", Icon: HardDrive, color: "var(--clpa-success-bright)", bg: "rgba(var(--clpa-success-bright-rgb),0.12)",
-      version: ssdFirmwareRaw ? `v${ssdFirmwareRaw}` : "vGXA7301Q", date: null, sample: !ssdFirmwareRaw,
+      version: ssdFirmwareRaw ? `v${ssdFirmwareRaw}` : "—", date: null, sample: !ssdFirmwareRaw,
     },
   ];
 
@@ -4311,16 +4512,12 @@ function HWDriversCard() {
           {anySample && <SampleTag />}
         </div>
         <button
-          onClick={() => {
-            refreshSync();
-            performAction("rescan-hardware");
-          }}
+          onClick={() => refreshSync()}
           className="flex items-center gap-1.5"
           style={{ background: "var(--clpa-primary)", border: "none", borderRadius: 8, padding: "5px 12px", cursor: "pointer" }}
         >
           <RefreshCw size={10} color="white" strokeWidth={2.2} />
-          <span style={{ fontSize: 10, color: "white", fontWeight: 600 }}>Check for Updates</span>
-          <SampleTag />
+          <span style={{ fontSize: 10, color: "white", fontWeight: 600 }}>Refresh</span>
         </button>
       </div>
       <div className="grid gap-2" style={{ gridTemplateColumns: "repeat(4, 1fr)" }}>
@@ -4477,7 +4674,6 @@ function WSStatusRow() {
 
 // KPI 1: Warranty only — status + countdown + action
 function WWarrantyStatusCard() {
-  const { performAction } = useApp();
   const warrantyEndDate: string | null = null;
   const warrantyStartDate: string | null = null;
   const warrantyState = getWarrantyState(warrantyEndDate);
@@ -4508,24 +4704,26 @@ function WWarrantyStatusCard() {
         </div>
       </div>
 
-      <div className="rounded-lg mt-3" style={{ background: "rgba(var(--clpa-warning-bright-rgb),0.08)", border: "1px solid rgba(var(--clpa-warning-bright-rgb),0.28)", padding: "8px 9px" }}>
-        <div className="flex items-center gap-1.5 mb-1.5">
-          <AlertTriangle size={12} color="var(--clpa-warning)" strokeWidth={2.2} />
-          <span style={{ fontSize: 9, fontWeight: 700, color: "var(--clpa-warning-deep)" }}>Action Required</span>
-          <SampleTag />
+      {known ? (
+        <div className="rounded-lg mt-3" style={{ background: "rgba(var(--clpa-warning-bright-rgb),0.08)", border: "1px solid rgba(var(--clpa-warning-bright-rgb),0.28)", padding: "8px 9px" }}>
+          <div className="flex items-center gap-1.5 mb-1.5">
+            <AlertTriangle size={12} color="var(--clpa-warning)" strokeWidth={2.2} />
+            <span style={{ fontSize: 9, fontWeight: 700, color: "var(--clpa-warning-deep)" }}>{isExpired ? "Expired" : "Renewal window"}</span>
+          </div>
+          <div style={{ fontSize: 8.5, color: "var(--clpa-muted)", lineHeight: 1.35 }}>
+            {isExpired
+              ? `Expired ${daysDelta} days ago. OEM warranty lookup is not connected, so extend/renew cannot be requested from this agent.`
+              : `Expires in ${daysDelta} days. OEM warranty lookup is not connected, so extend/renew cannot be requested from this agent.`}
+          </div>
         </div>
-        <div style={{ fontSize: 8.5, color: "var(--clpa-muted)", lineHeight: 1.35, marginBottom: 7 }}>
-          {known
-            ? isExpired
-              ? `Expired ${daysDelta} days ago. Extend for continued protection.`
-              : `Expires in ${daysDelta} days. Extend for continued protection.`
-            : "Dell, HP, and Lenovo warranty lookup is not connected yet."}
+      ) : (
+        <div className="rounded-lg mt-3" style={{ background: "var(--clpa-surface)", border: "1px solid var(--clpa-surface-border)", padding: "8px 9px" }}>
+          <div style={{ fontSize: 9, fontWeight: 700, color: "var(--clpa-body)", marginBottom: 4 }}>OEM warranty not connected</div>
+          <div style={{ fontSize: 8.5, color: "var(--clpa-muted)", lineHeight: 1.35 }}>
+            Dell, HP, and Lenovo coverage lookup is not wired. Serial and manufacturer on this page are from this PC.
+          </div>
         </div>
-        <button onClick={() => performAction("extend-warranty")} className="w-full flex items-center justify-center gap-1.5" style={{ background: "var(--clpa-card)", border: "1px solid rgba(var(--clpa-warning-bright-rgb),0.4)", borderRadius: 7, padding: "5px 8px", cursor: "pointer" }}>
-          <span style={{ fontSize: 9.5, color: "var(--clpa-warning)", fontWeight: 700 }}>Extend Warranty</span>
-          <SampleTag />
-        </button>
-      </div>
+      )}
     </WCard>
   );
 }
@@ -4592,15 +4790,12 @@ function WSubscriptionStatusCard() {
           </div>
           <div className="flex items-center gap-1" style={{ marginTop: 2 }}>
             <span style={{ fontSize: 9, color: "var(--clpa-muted)" }}>{entitlementReal ? "Plan from Command Centre" : "Not synced"}</span>
-            <SampleTag />
           </div>
           <div className="flex items-center gap-1" style={{ marginTop: 8 }}>
             <span style={{ fontSize: 16, fontWeight: 900, color: "var(--clpa-title)", lineHeight: 1 }}>{expiryDateLabel}</span>
-            {!expiresAtReal && <SampleTag />}
           </div>
           <div className="flex items-center gap-1" style={{ marginTop: 2 }}>
             <span style={{ fontSize: 8.5, color: "var(--clpa-subtle)" }}>{renewsInLabel}</span>
-            {daysUntilExpiry == null && <SampleTag />}
           </div>
         </div>
       </div>
@@ -4612,14 +4807,12 @@ function WSubscriptionStatusCard() {
           <div style={{ fontSize: 8, color: "var(--clpa-subtle)" }}>Billing</div>
           <div className="flex items-center gap-1" style={{ marginTop: 2 }}>
             <span style={{ fontSize: 11, fontWeight: 800, color: "var(--clpa-title)" }}>—</span>
-            <SampleTag />
           </div>
         </div>
         <div className="rounded-lg" style={{ background: "var(--clpa-surface)", border: "1px solid var(--clpa-surface-border)", padding: "7px 8px" }}>
           <div style={{ fontSize: 8, color: "var(--clpa-subtle)" }}>Next Payment</div>
           <div className="flex items-center gap-1" style={{ marginTop: 2 }}>
             <span style={{ fontSize: 11, fontWeight: 800, color: "var(--clpa-title)" }}>—</span>
-            <SampleTag />
           </div>
         </div>
       </div>
@@ -4704,7 +4897,6 @@ function WSDetailsRow() {
 }
 
 function WWarrantyDetailsCard() {
-  const { performAction } = useApp();
   const { data, connected } = useTelemetry();
 
   // Same real Win32_ComputerSystem.Manufacturer field the Hardware page's own "Manufacturer"
@@ -4733,11 +4925,6 @@ function WWarrantyDetailsCard() {
       <div className="grid gap-3" style={{ gridTemplateColumns: "1fr 1fr" }}>
         <div className="flex flex-col gap-1.5">
           {details.map((d, i) => <WKV key={i} {...d} />)}
-          <button onClick={() => performAction("view-warranty-documents")} className="flex items-center justify-center gap-1.5 mt-2" style={{ background: "var(--clpa-surface)", border: "1px solid var(--clpa-input-border)", borderRadius: 8, padding: "6px 10px", cursor: "pointer" }}>
-            <Award size={11} style={{ color: "var(--clpa-primary)" }} strokeWidth={2} />
-            <span style={{ fontSize: 9.5, color: "var(--clpa-primary)", fontWeight: 600 }}>View Documents</span>
-            <SampleTag />
-          </button>
         </div>
 
         <div>
@@ -4789,8 +4976,8 @@ function WSubscriptionDetailsCard() {
         <div className="flex flex-col gap-1.5">
           {details.map((d, i) => <WKV key={i} {...d} />)}
           <button onClick={() => navigate("settings")} className="flex items-center justify-center gap-1.5 mt-2" style={{ background: "var(--clpa-surface)", border: "1px solid var(--clpa-input-border)", borderRadius: 8, padding: "6px 10px", cursor: "pointer" }}>
-            <CreditCard size={11} style={{ color: "var(--clpa-primary)" }} strokeWidth={2} />
-            <span style={{ fontSize: 9.5, color: "var(--clpa-primary)", fontWeight: 600 }}>Manage Subscription</span>
+            <Settings size={11} style={{ color: "var(--clpa-primary)" }} strokeWidth={2} />
+            <span style={{ fontSize: 9.5, color: "var(--clpa-primary)", fontWeight: 600 }}>Open Settings</span>
           </button>
         </div>
 
@@ -4826,7 +5013,6 @@ function WSBottomRow() {
 }
 
 function WUsageCard() {
-  const { performAction } = useApp();
   const { data, connected } = useTelemetry();
 
   // Same real backend.countDevicesByTenant + entitlements.licensed_devices already used by
@@ -4841,39 +5027,35 @@ function WUsageCard() {
 
   const rows = [
     { label: "Monitored Devices", value: monitoredDevicesValue, pct: monitoredDevicesPct, sample: !monitoredDevicesReal },
-    { label: "API Calls", value: "—", pct: 0, sample: true },
-    { label: "Remote Sessions", value: "—", pct: 0, sample: true },
-    { label: "Storage Used", value: "—", pct: 0, sample: true },
   ];
   return (
     <WCard style={{ padding: "12px 14px" }}>
-      <WHead title="Usage & Entitlements" action="View Details" onAction={() => performAction("view-usage-details")} />
-      <div className="grid gap-2.5" style={{ gridTemplateColumns: "1fr 1fr" }}>
+      <WHead title="Usage & Entitlements" />
+      <div className="grid gap-2.5" style={{ gridTemplateColumns: "1fr" }}>
         {rows.map((r, i) => (
           <div key={i} className="rounded-lg" style={{ background: "var(--clpa-surface)", border: "1px solid var(--clpa-surface-border)", padding: "8px 9px" }}>
             <div className="flex items-center justify-between mb-1">
               <span style={{ fontSize: 8.5, color: "var(--clpa-muted)", fontWeight: 500 }}>{r.label}</span>
-              <div className="flex items-center gap-1">
-                <span style={{ fontSize: 9, fontWeight: 800, color: "var(--clpa-title)" }}>{r.pct}%</span>
-                {r.sample && <SampleTag />}
-              </div>
+              <span style={{ fontSize: 9, fontWeight: 800, color: "var(--clpa-title)" }}>{monitoredDevicesReal ? `${r.pct}%` : "—"}</span>
             </div>
             <div className="rounded-full overflow-hidden mb-1" style={{ height: 4, background: "var(--clpa-input-border)" }}>
-              <div style={{ width: `${r.pct}%`, height: "100%", background: "var(--clpa-primary)", borderRadius: 4 }} />
+              <div style={{ width: `${monitoredDevicesReal ? r.pct : 0}%`, height: "100%", background: "var(--clpa-primary)", borderRadius: 4 }} />
             </div>
             <div style={{ fontSize: 9, fontWeight: 600, color: "var(--clpa-body)" }}>{r.value}</div>
           </div>
         ))}
+      </div>
+      <div style={{ fontSize: 9, color: "var(--clpa-muted)", lineHeight: 1.4, marginTop: 10 }}>
+        API calls, remote-session counts, and cloud storage usage are not tracked on this agent.
       </div>
     </WCard>
   );
 }
 
 function WTransactionsCard() {
-  const { performAction } = useApp();
   return (
     <WCard style={{ padding: "12px 14px" }}>
-      <WHead title="Recent Transactions" action="View All" onAction={() => performAction("view-all-transactions")} />
+      <WHead title="Recent Transactions" />
       <div style={{ fontSize: 9.5, color: "var(--clpa-muted)", padding: "12px 4px" }}>
         No billing history on this agent.
       </div>
@@ -4884,27 +5066,116 @@ function WTransactionsCard() {
 // ─── ALERTS PAGE ──────────────────────────────────────────
 // ═══════════════════════════════════════════════════════════
 
-type AlertFilter = "all" | AlertSeverity | "unread";
+type AlertFilter = "all" | AlertSeverity | "unread" | "resolved";
 
-// Real, rule-based priority order - severity descending, then recency (alerts is already
-// newest-first, so a stable sort's own tie-breaking on equal severity preserves that order
-// without a second explicit key). Deliberately not framed as AI anywhere - see Settings'
-// "Priority sorting" (renamed from "AI priority sorting") own comment.
 const SEVERITY_RANK: Record<AlertSeverity, number> = { critical: 3, warning: 2, info: 1 };
 function sortByPriority(alerts: AlertItem[]): AlertItem[] {
   return [...alerts].sort((a, b) => SEVERITY_RANK[b.severity] - SEVERITY_RANK[a.severity]);
 }
 
+function prettyAlertCategory(category: string): string {
+  if (category === "BatteryHealth") return "Battery health";
+  return category;
+}
+
+function alertRelativeTime(alert: AlertItem): string {
+  return formatRelativeTime(new Date(alert.createdAt).toISOString()) ?? alert.time;
+}
+
+function liveReadingForAlert(
+  alert: AlertItem,
+  data: TelemetrySnapshot | null | undefined,
+  connected: boolean,
+): string | null {
+  switch (alert.ruleId) {
+    case "cpu-load": {
+      const v = getCpuLoad(data, connected);
+      return v != null ? `Live CPU ${v}%` : null;
+    }
+    case "memory-usage": {
+      const v = getMemUsedPercent(data, connected);
+      return v != null ? `Live RAM ${v}%` : null;
+    }
+    case "storage-free": {
+      const used = getWorstStorageUsedPct(data, connected);
+      return used != null ? `Live ${Math.round(100 - used)}% free on fullest volume` : null;
+    }
+    case "battery-low": {
+      const v = getBatteryChargePercent(data, connected);
+      return v != null ? `Live charge ${v}%` : null;
+    }
+    case "cpu-temp": {
+      const v = connected ? data?.hardwareMonitor?.cpuTempC ?? null : null;
+      return v != null ? `Live CPU ${Math.round(v)}°C` : null;
+    }
+    case "battery-health": {
+      const v = getBatteryHealthPercent(data, connected);
+      return v != null ? `Live health ${v}%` : null;
+    }
+    default:
+      return null;
+  }
+}
+
+function nextStepForAlert(alert: AlertItem): string | null {
+  switch (alert.ruleId) {
+    case "storage-free":
+      return "Free space on the fullest volume, or move files off this disk.";
+    case "battery-health":
+      return "Health is below the replacement line. Plan a battery service.";
+    case "battery-low":
+      return "Plug in while the pack is discharging.";
+    case "cpu-temp":
+      return "CPU is hot. Ease load and check vents.";
+    case "cpu-load":
+      return "CPU is above the load threshold in Settings.";
+    case "memory-usage":
+      return "RAM is above the usage threshold in Settings.";
+    default:
+      return null;
+  }
+}
+
+function categoryIcon(category: string): typeof Cpu {
+  if (category === "Storage") return HardDrive;
+  if (category === "Battery" || category === "BatteryHealth") return Battery;
+  if (category === "Security") return Shield;
+  if (category === "Warranty") return Award;
+  if (category === "Remote") return Headphones;
+  return Cpu;
+}
+
 function AlertsPage() {
-  const { alerts, acknowledgeAlert, dismissAlert, snoozeAlert, snoozedUntil, dismissedButActive, groupSimilarAlertsEnabled, prioritySortingEnabled } = useApp();
+  const {
+    alerts,
+    acknowledgeAlert,
+    dismissAlert,
+    snoozeAlert,
+    snoozedUntil,
+    dismissedButActive,
+    groupSimilarAlertsEnabled,
+    prioritySortingEnabled,
+    markAllAlertsRead,
+    unreadCount,
+  } = useApp();
   const liveAlerts = alerts.filter((a) => a.source !== "sample");
   const [filter, setFilter] = useState<AlertFilter>("all");
+  const [categoryFilter, setCategoryFilter] = useState<string>("all");
+  const [query, setQuery] = useState("");
   const [selectedId, setSelectedId] = useState(liveAlerts[0]?.id ?? "");
 
   const filteredRaw = liveAlerts.filter((a) => {
-    if (filter === "unread") return a.unread;
-    if (filter === "all") return true;
-    return a.severity === filter;
+    if (filter === "unread") {
+      if (!a.unread) return false;
+    } else if (filter === "resolved") {
+      if (a.unread) return false;
+    } else if (filter !== "all" && a.severity !== filter) {
+      return false;
+    }
+    if (categoryFilter !== "all" && a.category !== categoryFilter) return false;
+    const q = query.trim().toLowerCase();
+    if (!q) return true;
+    return `${a.title} ${a.detail} ${a.category}`.toLowerCase().includes(q);
   });
   const filtered = prioritySortingEnabled ? sortByPriority(filteredRaw) : filteredRaw;
 
@@ -4917,36 +5188,137 @@ function AlertsPage() {
   }, [liveAlerts, filtered, selectedId]);
 
   const counts = {
+    open: liveAlerts.filter((a) => a.unread).length,
     critical: liveAlerts.filter((a) => a.severity === "critical" && a.unread).length,
     warning: liveAlerts.filter((a) => a.severity === "warning" && a.unread).length,
-    unread: liveAlerts.filter((a) => a.unread).length,
+    resolved: liveAlerts.filter((a) => !a.unread).length,
   };
+
+  const categoriesPresent = [...new Set(liveAlerts.map((a) => a.category))];
 
   return (
     <CLPAPage>
       <CLPARow columns="1fr 1fr 1fr 1fr">
-        <ASeverityCard label="Critical" value={counts.critical} sub="Immediate action" color="var(--clpa-critical)" bg="rgba(var(--clpa-critical-bright-rgb),0.08)" Icon={AlertTriangle} />
-        <ASeverityCard label="Warning" value={counts.warning} sub="Review recommended" color="var(--clpa-warning)" bg="rgba(var(--clpa-warning-bright-rgb),0.1)" Icon={Bell} />
-        <ASeverityCard label="Unread" value={counts.unread} sub="Pending acknowledgement" color="var(--clpa-accent-strong)" bg="rgba(var(--clpa-accent-rgb),0.08)" Icon={Clock} />
         <ASeverityCard
-          label="Dismissed, Still Active"
-          value={dismissedButActive.length}
-          sub={dismissedButActive.length > 0 ? "No alert until it re-crosses" : "Nothing hidden right now"}
-          color="var(--clpa-warning-deep)"
+          label="Open"
+          value={counts.open}
+          sub="Waiting on acknowledge"
+          color="var(--clpa-primary)"
+          bg="rgba(var(--clpa-primary-rgb),0.08)"
+          Icon={Bell}
+          active={filter === "unread"}
+          onClick={() => setFilter("unread")}
+        />
+        <ASeverityCard
+          label="Critical"
+          value={counts.critical}
+          sub="Needs action now"
+          color="var(--clpa-critical)"
+          bg="rgba(var(--clpa-critical-bright-rgb),0.08)"
+          Icon={AlertTriangle}
+          active={filter === "critical"}
+          onClick={() => setFilter("critical")}
+        />
+        <ASeverityCard
+          label="Warning"
+          value={counts.warning}
+          sub="Still open"
+          color="var(--clpa-warning)"
           bg="rgba(var(--clpa-warning-bright-rgb),0.1)"
-          Icon={EyeOff}
+          Icon={Zap}
+          active={filter === "warning"}
+          onClick={() => setFilter("warning")}
+        />
+        <ASeverityCard
+          label="Resolved"
+          value={counts.resolved}
+          sub="Acknowledged on this device"
+          color="var(--clpa-success)"
+          bg="rgba(var(--clpa-success-bright-rgb),0.08)"
+          Icon={CheckCircle2}
+          active={filter === "resolved"}
+          onClick={() => setFilter("resolved")}
         />
       </CLPARow>
 
-      <ATopBar filter={filter} setFilter={setFilter} unreadCount={counts.unread} />
+      {dismissedButActive.length > 0 && (
+        <div
+          className="flex items-start gap-2 rounded-xl"
+          style={{ background: "rgba(var(--clpa-warning-bright-rgb),0.1)", border: "1px solid rgba(var(--clpa-warning-bright-rgb),0.28)", padding: "8px 12px" }}
+        >
+          <EyeOff size={14} style={{ color: "var(--clpa-warning)", marginTop: 1, flexShrink: 0 }} strokeWidth={2} />
+          <div className="min-w-0">
+            <div style={{ fontSize: 11, fontWeight: 700, color: "var(--clpa-title)" }}>
+              {dismissedButActive.length} dismissed condition{dismissedButActive.length === 1 ? "" : "s"} still active
+            </div>
+            <div style={{ fontSize: 9.5, color: "var(--clpa-muted)", marginTop: 2, lineHeight: 1.4 }}>
+              {dismissedButActive.map((r) => prettyAlertCategory(r.category)).join(" · ")}. No new alert until it clears and crosses the threshold again.
+            </div>
+          </div>
+        </div>
+      )}
 
-      <CLPARow columns="3fr 2fr">
+      <ATopBar
+        filter={filter}
+        setFilter={setFilter}
+        counts={counts}
+        query={query}
+        setQuery={setQuery}
+        unreadCount={unreadCount}
+        onMarkAllRead={unreadCount > 0 ? markAllAlertsRead : undefined}
+      />
+
+      {categoriesPresent.length > 1 && (
+        <div className="flex items-center gap-1.5 flex-wrap">
+          <button
+            onClick={() => setCategoryFilter("all")}
+            style={{
+              background: categoryFilter === "all" ? "rgba(var(--clpa-primary-rgb),0.1)" : "var(--clpa-card)",
+              border: categoryFilter === "all" ? "1px solid rgba(var(--clpa-primary-rgb),0.25)" : "1px solid var(--clpa-surface-border)",
+              borderRadius: 8,
+              padding: "3px 8px",
+              cursor: "pointer",
+              fontSize: 9,
+              fontWeight: 700,
+              color: categoryFilter === "all" ? "var(--clpa-primary)" : "var(--clpa-muted)",
+            }}
+          >
+            All types
+          </button>
+          {categoriesPresent.map((cat) => {
+            const active = categoryFilter === cat;
+            const CatIcon = categoryIcon(cat);
+            const n = liveAlerts.filter((a) => a.category === cat && a.unread).length;
+            return (
+              <button
+                key={cat}
+                onClick={() => setCategoryFilter(active ? "all" : cat)}
+                className="flex items-center gap-1"
+                style={{
+                  background: active ? "rgba(var(--clpa-primary-rgb),0.1)" : "var(--clpa-card)",
+                  border: active ? "1px solid rgba(var(--clpa-primary-rgb),0.25)" : "1px solid var(--clpa-surface-border)",
+                  borderRadius: 8,
+                  padding: "3px 8px",
+                  cursor: "pointer",
+                }}
+              >
+                <CatIcon size={10} style={{ color: active ? "var(--clpa-primary)" : "var(--clpa-muted)" }} strokeWidth={2} />
+                <span style={{ fontSize: 9, fontWeight: 700, color: active ? "var(--clpa-primary)" : "var(--clpa-muted)" }}>{prettyAlertCategory(cat)}</span>
+                {n > 0 && <span style={{ fontSize: 8, fontWeight: 800, color: "var(--clpa-critical)" }}>{n}</span>}
+              </button>
+            );
+          })}
+        </div>
+      )}
+
+      <CLPARow columns="minmax(0, 1.2fr) minmax(0, 0.9fr)">
         <AAlertFeedCard
           alerts={filtered}
           selectedId={selected?.id}
           onSelect={setSelectedId}
           onAcknowledge={acknowledgeAlert}
           groupByCategory={groupSimilarAlertsEnabled}
+          emptyHint={query.trim() ? "No alerts match this search." : "No alerts in this view."}
         />
         <AAlertDetailCard
           alert={selected}
@@ -4957,7 +5329,7 @@ function AlertsPage() {
         />
       </CLPARow>
 
-      <AAlertHistoryCard alerts={liveAlerts} snoozedUntil={snoozedUntil} />
+      <AAlertHistoryCard alerts={liveAlerts} snoozedUntil={snoozedUntil} onSelect={setSelectedId} selectedId={selected?.id} />
     </CLPAPage>
   );
 }
@@ -4969,6 +5341,8 @@ function ASeverityCard({
   color,
   bg,
   Icon,
+  active,
+  onClick,
 }: {
   label: string;
   value: number;
@@ -4976,9 +5350,22 @@ function ASeverityCard({
   color: string;
   bg: string;
   Icon: typeof AlertTriangle;
+  active?: boolean;
+  onClick?: () => void;
 }) {
   return (
-    <CLPACard style={{ padding: "10px 12px" }}>
+    <button
+      type="button"
+      onClick={onClick}
+      className="clpa-card-hover rounded-2xl text-left w-full"
+      style={{
+        padding: "10px 12px",
+        background: "var(--clpa-card)",
+        border: active ? `1px solid ${color}` : "1px solid var(--clpa-card-border)",
+        boxShadow: "0 2px 8px rgba(0,0,0,0.06)",
+        cursor: "pointer",
+      }}
+    >
       <div className="flex items-center gap-2.5">
         <div className="flex items-center justify-center rounded-xl flex-shrink-0" style={{ width: 32, height: 32, background: bg }}>
           <Icon size={15} style={{ color }} strokeWidth={2} />
@@ -4989,53 +5376,79 @@ function ASeverityCard({
           <div style={{ fontSize: 8, color: "var(--clpa-subtle)", marginTop: 1 }}>{sub}</div>
         </div>
       </div>
-    </CLPACard>
+    </button>
   );
 }
 
 function ATopBar({
   filter,
   setFilter,
+  counts,
+  query,
+  setQuery,
   unreadCount,
+  onMarkAllRead,
 }: {
   filter: AlertFilter;
   setFilter: (f: AlertFilter) => void;
+  counts: { open: number; critical: number; warning: number; resolved: number };
+  query: string;
+  setQuery: (q: string) => void;
   unreadCount: number;
+  onMarkAllRead?: () => void;
 }) {
   const chips: { id: AlertFilter; label: string; count?: number }[] = [
     { id: "all", label: "All" },
-    { id: "unread", label: "Unread", count: unreadCount },
-    { id: "critical", label: "Critical" },
-    { id: "warning", label: "Warning" },
+    { id: "unread", label: "Open", count: counts.open },
+    { id: "critical", label: "Critical", count: counts.critical },
+    { id: "warning", label: "Warning", count: counts.warning },
     { id: "info", label: "Info" },
+    { id: "resolved", label: "Resolved", count: counts.resolved },
   ];
 
   return (
-    <div className="flex items-center gap-1.5 flex-wrap">
-        {chips.map((chip) => {
-          const active = filter === chip.id;
-          return (
-            <button
-              key={chip.id}
-              onClick={() => setFilter(chip.id)}
-              className="flex items-center gap-1"
-              style={{
-                background: active ? "rgba(var(--clpa-primary-rgb),0.1)" : "var(--clpa-card)",
-                border: active ? "1px solid rgba(var(--clpa-primary-rgb),0.25)" : "1px solid rgba(0,0,0,0.08)",
-                borderRadius: 999,
-                padding: "4px 10px",
-                cursor: "pointer",
-              }}
-            >
-              <span style={{ fontSize: 9.5, fontWeight: active ? 700 : 500, color: active ? "var(--clpa-primary)" : "var(--clpa-muted)" }}>{chip.label}</span>
-              {chip.count !== undefined && chip.count > 0 && (
-                <span style={{ fontSize: 8, fontWeight: 700, color: "#FFFFFF", background: "var(--clpa-critical-bright)", borderRadius: 999, padding: "1px 5px", minWidth: 14, textAlign: "center" }}>
-                  {chip.count}
-                </span>
-              )}
-            </button>
-          );
-        })}
+    <div className="flex items-center gap-2 flex-wrap">
+      {chips.map((chip) => {
+        const active = filter === chip.id;
+        return (
+          <button
+            key={chip.id}
+            onClick={() => setFilter(chip.id)}
+            className="flex items-center gap-1"
+            style={{
+              background: active ? "rgba(var(--clpa-primary-rgb),0.1)" : "var(--clpa-card)",
+              border: active ? "1px solid rgba(var(--clpa-primary-rgb),0.25)" : "1px solid rgba(0,0,0,0.08)",
+              borderRadius: 999,
+              padding: "5px 11px",
+              cursor: "pointer",
+            }}
+          >
+            <span style={{ fontSize: 10, fontWeight: active ? 700 : 500, color: active ? "var(--clpa-primary)" : "var(--clpa-muted)" }}>{chip.label}</span>
+            {chip.count !== undefined && chip.count > 0 && (
+              <span style={{ fontSize: 8, fontWeight: 700, color: "#FFFFFF", background: chip.id === "critical" ? "var(--clpa-critical-bright)" : "var(--clpa-primary)", borderRadius: 999, padding: "1px 5px", minWidth: 14, textAlign: "center" }}>
+                {chip.count}
+              </span>
+            )}
+          </button>
+        );
+      })}
+      <div className="flex items-center gap-1.5 flex-1 min-w-[160px] rounded-full" style={{ background: "var(--clpa-card)", border: "1px solid var(--clpa-surface-border)", padding: "4px 10px" }}>
+        <Search size={12} style={{ color: "var(--clpa-subtle)", flexShrink: 0 }} strokeWidth={2} />
+        <input
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Search alerts"
+          style={{ flex: 1, minWidth: 0, border: "none", outline: "none", background: "transparent", fontSize: 10.5, color: "var(--clpa-body)" }}
+        />
+      </div>
+      {onMarkAllRead && unreadCount > 0 && (
+        <button
+          onClick={onMarkAllRead}
+          style={{ background: "var(--clpa-primary)", border: "none", borderRadius: 8, padding: "5px 10px", cursor: "pointer", fontSize: 9.5, fontWeight: 700, color: "white", whiteSpace: "nowrap" }}
+        >
+          Mark all read
+        </button>
+      )}
     </div>
   );
 }
@@ -5078,20 +5491,20 @@ function AAlertFeedRow({
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-1.5 mb-0.5">
           {alert.unread && <span className="clpa-dot flex-shrink-0" style={{ width: 6, height: 6, borderRadius: 999, background: "var(--clpa-primary)" }} />}
-          <span style={{ fontSize: 10.5, fontWeight: 700, color: "var(--clpa-title)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{alert.title}</span>
+          <span style={{ fontSize: 11, fontWeight: 700, color: "var(--clpa-title)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{alert.title}</span>
           {alert.occurrenceCount > 1 && (
             <CLPABadge label={`×${alert.occurrenceCount}`} color="var(--clpa-accent-strong)" bg="rgba(var(--clpa-accent-strong-rgb),0.1)" />
           )}
-          {alert.source === "sample" && <SampleTag />}
         </div>
-        <div style={{ fontSize: 9, color: "var(--clpa-muted)", lineHeight: 1.35, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>
+        <div style={{ fontSize: 9.5, color: "var(--clpa-muted)", lineHeight: 1.4, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>
           {alert.detail}
         </div>
-        <div className="flex items-center gap-2 mt-1.5">
+        <div className="flex items-center gap-2 mt-1.5 flex-wrap">
           <CLPABadge label={meta.label} color={meta.color} bg={meta.bg} />
-          <span style={{ fontSize: 8, color: "var(--clpa-subtle)" }}>{alert.category}</span>
-          <span style={{ fontSize: 8, color: "var(--clpa-track)" }}>·</span>
-          <span style={{ fontSize: 8, color: "var(--clpa-subtle)" }}>{alert.time}</span>
+          <span style={{ fontSize: 8.5, color: "var(--clpa-subtle)" }}>{prettyAlertCategory(alert.category)}</span>
+          <span style={{ fontSize: 8.5, color: "var(--clpa-track)" }}>·</span>
+          <span style={{ fontSize: 8.5, color: "var(--clpa-subtle)" }}>{alertRelativeTime(alert)}</span>
+          {!alert.unread && <CLPABadge label="Acknowledged" color="var(--clpa-success)" bg="rgba(var(--clpa-success-bright-rgb),0.12)" />}
         </div>
       </div>
       {alert.unread && (
@@ -5101,7 +5514,7 @@ function AAlertFeedRow({
             onAcknowledge(alert.id);
           }}
           className="flex-shrink-0"
-          style={{ background: "none", border: "none", cursor: "pointer", fontSize: 8.5, color: "var(--clpa-primary)", fontWeight: 700, padding: "2px 4px" }}
+          style={{ background: "rgba(var(--clpa-primary-rgb),0.1)", border: "1px solid rgba(var(--clpa-primary-rgb),0.2)", borderRadius: 6, cursor: "pointer", fontSize: 8.5, color: "var(--clpa-primary)", fontWeight: 700, padding: "3px 7px" }}
         >
           Ack
         </button>
@@ -5134,30 +5547,35 @@ function AAlertFeedCard({
   onSelect,
   onAcknowledge,
   groupByCategory,
+  emptyHint,
 }: {
   alerts: AlertItem[];
   selectedId?: string;
   onSelect: (id: string) => void;
   onAcknowledge: (id: string) => void;
   groupByCategory: boolean;
+  emptyHint: string;
 }) {
   return (
-    <CLPACard style={{ padding: "12px 14px", display: "flex", flexDirection: "column", minHeight: 240 }}>
-      <CLPAHeader title="ACTIVE ALERTS" badge={`${alerts.length} shown`} badgeColor="var(--clpa-muted)" badgeBg="var(--clpa-divider)" />
+    <CLPACard style={{ padding: "12px 14px", display: "flex", flexDirection: "column", minHeight: 320 }}>
+      <div className="flex items-center justify-between mb-2.5">
+        <span style={{ fontSize: 11, fontWeight: 800, color: "var(--clpa-title)", letterSpacing: 0.4 }}>ALERT FEED</span>
+        <CLPABadge label={`${alerts.length} shown`} color="var(--clpa-muted)" bg="var(--clpa-divider)" />
+      </div>
 
       {alerts.length === 0 ? (
         <div className="flex-1 flex flex-col items-center justify-center text-center py-8">
           <CheckCircle2 size={28} style={{ color: "var(--clpa-success-bright)", marginBottom: 8 }} strokeWidth={1.8} />
-          <div style={{ fontSize: 12, fontWeight: 700, color: "var(--clpa-title)" }}>No alerts in this view</div>
-          <div style={{ fontSize: 10, color: "var(--clpa-subtle)", marginTop: 4 }}>All clear for the selected filter.</div>
+          <div style={{ fontSize: 12, fontWeight: 700, color: "var(--clpa-title)" }}>{emptyHint}</div>
+          <div style={{ fontSize: 10, color: "var(--clpa-subtle)", marginTop: 4 }}>Open, Critical, or search to change this list.</div>
         </div>
       ) : (
-        <div className="flex flex-col gap-1.5 flex-1 overflow-y-auto clpa-scroll" style={{ scrollbarWidth: "none", maxHeight: 220 }}>
+        <div className="flex flex-col gap-1.5 flex-1 overflow-y-auto clpa-scroll" style={{ scrollbarWidth: "none", maxHeight: 340 }}>
           {groupByCategory ? (
             groupAlertsByCategory(alerts).map((group) => (
               <div key={group.category} className="flex flex-col gap-1.5">
-                <div style={{ fontSize: 7.5, fontWeight: 700, color: "var(--clpa-subtle)", letterSpacing: 0.4, marginTop: 2 }}>
-                  {group.category.toUpperCase()}
+                <div style={{ fontSize: 8, fontWeight: 700, color: "var(--clpa-subtle)", letterSpacing: 0.4, marginTop: 2 }}>
+                  {prettyAlertCategory(group.category).toUpperCase()}
                 </div>
                 {group.alerts.map((alert) => (
                   <AAlertFeedRow key={alert.id} alert={alert} isSelected={alert.id === selectedId} onSelect={onSelect} onAcknowledge={onAcknowledge} />
@@ -5188,19 +5606,18 @@ function AAlertDetailCard({
   onSnooze: (id: string) => void;
   snoozedUntil: Partial<Record<string, number>>;
 }) {
-  // Real telemetry, same fields and fallback convention HWDeviceOverviewCard already uses
-  // (data.system.Name / data.enclosure.SMBIOSAssetTag, "Not available" when absent) - this
-  // card renders for every alert regardless of source ("real" or "sample"), but the device
-  // these rows describe is always this one real machine either way, so wiring them to actual
-  // telemetry is correct even for an illustrative seed alert, not just the real rule-fired ones.
+  const { navigate } = useApp();
   const { data, connected } = useTelemetry();
-  const deviceModel = connected && data?.system?.Name ? data.system.Name : "Unknown model";
-  const assetId = connected && data?.enclosure?.SMBIOSAssetTag ? data.enclosure.SMBIOSAssetTag : "Not available";
+  const deviceModel = !connected
+    ? "Agent offline"
+    : (data?.system?.Name?.trim() || data?.system?.Vendor?.trim() || "This device");
+  const liveReading = alert ? liveReadingForAlert(alert, data, connected) : null;
+  const nextStep = alert ? nextStepForAlert(alert) : null;
 
   if (!alert) {
     return (
-      <CLPACard style={{ padding: "16px 14px", minHeight: 200, display: "flex", alignItems: "center", justifyContent: "center" }}>
-        <span style={{ fontSize: 10, color: "var(--clpa-subtle)" }}>Select an alert to view details</span>
+      <CLPACard style={{ padding: "16px 14px", minHeight: 320, display: "flex", alignItems: "center", justifyContent: "center" }}>
+        <span style={{ fontSize: 10.5, color: "var(--clpa-subtle)" }}>Select an alert from the feed</span>
       </CLPACard>
     );
   }
@@ -5210,39 +5627,53 @@ function AAlertDetailCard({
   const isRuleSnoozed = ruleSnoozeUntil != null && ruleSnoozeUntil > Date.now();
 
   return (
-    <CLPACard style={{ padding: "12px 14px" }}>
-      <CLPAHeader title="ALERT DETAILS" badge={meta.label} badgeColor={meta.color} badgeBg={meta.bg} />
+    <CLPACard style={{ padding: "12px 14px", minHeight: 320, display: "flex", flexDirection: "column" }}>
+      <div className="flex items-center justify-between mb-2.5">
+        <span style={{ fontSize: 11, fontWeight: 800, color: "var(--clpa-title)", letterSpacing: 0.4 }}>DETAILS</span>
+        <CLPABadge label={meta.label} color={meta.color} bg={meta.bg} />
+      </div>
 
       <div className="flex items-start gap-2.5 mb-2.5">
-        <div className="flex items-center justify-center rounded-xl flex-shrink-0" style={{ width: 34, height: 34, background: alert.iconBg }}>
+        <div className="flex items-center justify-center rounded-xl flex-shrink-0" style={{ width: 36, height: 36, background: alert.iconBg }}>
           <alert.Icon size={16} style={{ color: alert.iconColor }} strokeWidth={2} />
         </div>
         <div className="min-w-0">
-          <div className="flex items-center gap-1.5">
-            <span style={{ fontSize: 12, fontWeight: 800, color: "var(--clpa-title)", lineHeight: 1.3 }}>{alert.title}</span>
+          <div className="flex items-center gap-1.5 flex-wrap">
+            <span style={{ fontSize: 13, fontWeight: 800, color: "var(--clpa-title)", lineHeight: 1.3 }}>{alert.title}</span>
             {alert.occurrenceCount > 1 && (
-              <CLPABadge label={`×${alert.occurrenceCount} occurrences`} color="var(--clpa-accent-strong)" bg="rgba(var(--clpa-accent-strong-rgb),0.1)" />
+              <CLPABadge label={`×${alert.occurrenceCount}`} color="var(--clpa-accent-strong)" bg="rgba(var(--clpa-accent-strong-rgb),0.1)" />
             )}
-            {alert.source === "sample" && <SampleTag />}
           </div>
-          <div style={{ fontSize: 9, color: "var(--clpa-subtle)", marginTop: 3 }}>{alert.category} · {alert.time}</div>
+          <div style={{ fontSize: 9.5, color: "var(--clpa-subtle)", marginTop: 4 }}>
+            {prettyAlertCategory(alert.category)} · {alertRelativeTime(alert)}
+          </div>
         </div>
       </div>
 
-      <div className="rounded-lg mb-2.5" style={{ background: "var(--clpa-surface)", border: "1px solid var(--clpa-surface-border)", padding: "8px 10px" }}>
-        <div style={{ fontSize: 9.5, color: "var(--clpa-body-alt)", lineHeight: 1.45 }}>{alert.detail}</div>
+      <div className="rounded-lg mb-2.5" style={{ background: "var(--clpa-surface)", border: "1px solid var(--clpa-surface-border)", padding: "9px 10px" }}>
+        <div style={{ fontSize: 10.5, color: "var(--clpa-body-alt)", lineHeight: 1.5 }}>{alert.detail}</div>
+        {liveReading && (
+          <div style={{ fontSize: 10, fontWeight: 700, color: "var(--clpa-title)", marginTop: 8 }}>{liveReading}</div>
+        )}
       </div>
+
+      {nextStep && (
+        <div className="rounded-lg mb-2.5" style={{ background: "rgba(var(--clpa-primary-rgb),0.06)", border: "1px solid rgba(var(--clpa-primary-rgb),0.15)", padding: "8px 10px" }}>
+          <div style={{ fontSize: 8, fontWeight: 700, color: "var(--clpa-primary)", letterSpacing: 0.3, marginBottom: 3 }}>NEXT STEP</div>
+          <div style={{ fontSize: 10, color: "var(--clpa-body)", lineHeight: 1.4 }}>{nextStep}</div>
+        </div>
+      )}
 
       <div className="grid gap-1.5 mb-2.5" style={{ gridTemplateColumns: "1fr 1fr" }}>
         {[
           { label: "Device", value: deviceModel },
-          { label: "Asset ID", value: assetId },
-          { label: "Source", value: "CLPA Agent" },
-          { label: "Status", value: alert.unread ? "Unread" : "Acknowledged", valueColor: alert.unread ? "var(--clpa-warning)" : "var(--clpa-success)" },
+          { label: "Status", value: alert.unread ? "Open" : "Acknowledged", valueColor: alert.unread ? "var(--clpa-warning)" : "var(--clpa-success)" },
+          { label: "First seen", value: alert.time },
+          { label: "Rule", value: alert.ruleId ?? "—" },
         ].map((row) => (
-          <div key={row.label} className="rounded-md" style={{ background: "var(--clpa-surface)", padding: "6px 8px" }}>
+          <div key={row.label} className="rounded-md" style={{ background: "var(--clpa-surface)", padding: "7px 8px" }}>
             <div style={{ fontSize: 8, color: "var(--clpa-subtle)", fontWeight: 600 }}>{row.label}</div>
-            <div style={{ fontSize: 9.5, fontWeight: 700, color: (row as { valueColor?: string }).valueColor ?? "var(--clpa-body)", marginTop: 2 }}>{row.value}</div>
+            <div style={{ fontSize: 10, fontWeight: 700, color: row.valueColor ?? "var(--clpa-body)", marginTop: 2 }}>{row.value}</div>
           </div>
         ))}
       </div>
@@ -5251,77 +5682,44 @@ function AAlertDetailCard({
         <div className="flex items-center gap-1.5 rounded-lg mb-2.5" style={{ background: "rgba(var(--clpa-primary-rgb),0.08)", border: "1px solid rgba(var(--clpa-primary-rgb),0.2)", padding: "6px 9px" }}>
           <Clock size={10} style={{ color: "var(--clpa-primary)" }} strokeWidth={2} />
           <span style={{ fontSize: 8.5, color: "var(--clpa-info-blue)", fontWeight: 600 }}>
-            Snoozed — this rule won't re-alert until {formatTimeLabel(new Date(ruleSnoozeUntil as number))}
+            Snoozed until {formatTimeLabel(new Date(ruleSnoozeUntil as number))}
           </span>
         </div>
       )}
 
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-2 flex-wrap mt-auto">
         {alert.unread && (
           <button
             onClick={() => onAcknowledge(alert.id)}
             className="flex items-center gap-1.5"
-            style={{ background: "var(--clpa-primary)", border: "none", borderRadius: 8, padding: "5px 10px", cursor: "pointer" }}
+            style={{ background: "var(--clpa-primary)", border: "none", borderRadius: 8, padding: "6px 12px", cursor: "pointer" }}
           >
             <CheckCircle2 size={11} color="white" strokeWidth={2.2} />
-            <span style={{ fontSize: 9.5, color: "white", fontWeight: 700 }}>Acknowledge</span>
+            <span style={{ fontSize: 10, color: "white", fontWeight: 700 }}>Acknowledge</span>
           </button>
         )}
-        <button onClick={() => onSnooze(alert.id)} className="flex items-center gap-1.5" style={{ background: "var(--clpa-card)", border: "1px solid rgba(0,0,0,0.08)", borderRadius: 8, padding: "5px 10px", cursor: "pointer" }}>
+        <button onClick={() => onSnooze(alert.id)} className="flex items-center gap-1.5" style={{ background: "var(--clpa-card)", border: "1px solid rgba(0,0,0,0.08)", borderRadius: 8, padding: "6px 12px", cursor: "pointer" }}>
           <Clock size={11} style={{ color: "var(--clpa-muted)" }} strokeWidth={2} />
-          <span style={{ fontSize: 9.5, color: "var(--clpa-body-alt)", fontWeight: 600 }}>Snooze 24h</span>
+          <span style={{ fontSize: 10, color: "var(--clpa-body-alt)", fontWeight: 600 }}>Snooze 24h</span>
         </button>
         <button
           onClick={() => onDismiss(alert.id)}
           className="flex items-center gap-1.5"
-          style={{ background: "var(--clpa-card)", border: "1px solid rgba(var(--clpa-critical-bright-rgb),0.25)", borderRadius: 8, padding: "5px 10px", cursor: "pointer" }}
+          style={{ background: "var(--clpa-card)", border: "1px solid rgba(var(--clpa-critical-bright-rgb),0.25)", borderRadius: 8, padding: "6px 12px", cursor: "pointer" }}
         >
-          <span style={{ fontSize: 9.5, color: "var(--clpa-critical)", fontWeight: 600 }}>Dismiss</span>
+          <span style={{ fontSize: 10, color: "var(--clpa-critical)", fontWeight: 600 }}>Dismiss</span>
+        </button>
+        <button
+          onClick={() => navigate("settings")}
+          style={{ background: "none", border: "none", cursor: "pointer", fontSize: 9.5, color: "var(--clpa-primary)", fontWeight: 600, marginLeft: "auto" }}
+        >
+          Thresholds →
         </button>
       </div>
     </CLPACard>
   );
 }
 
-function ACategoryStrip({ alerts }: { alerts: AlertItem[] }) {
-  const categories = [
-    { label: "Thermal", Icon: Thermometer, color: "var(--clpa-critical-bright)" },
-    { label: "Battery", Icon: Battery, color: "var(--clpa-warning-bright)" },
-    { label: "Security", Icon: Shield, color: "var(--clpa-warning)" },
-    { label: "Firmware", Icon: Cpu, color: "var(--clpa-primary)" },
-    { label: "Network", Icon: Wifi, color: "var(--clpa-success-bright)" },
-    { label: "Warranty", Icon: Award, color: "var(--clpa-accent)" },
-  ].map((cat) => ({
-    ...cat,
-    count: alerts.filter((a) => a.category === cat.label).length,
-    unread: alerts.filter((a) => a.category === cat.label && a.unread).length,
-  }));
-
-  const active = categories.filter((c) => c.count > 0);
-  if (active.length === 0) return null;
-
-  return (
-    <div className="flex items-center gap-1.5 flex-wrap mb-2 pb-2" style={{ borderBottom: "1px solid var(--clpa-divider)" }}>
-      <span style={{ fontSize: 8, fontWeight: 700, color: "var(--clpa-subtle)", letterSpacing: 0.4 }}>CATEGORIES</span>
-      {active.map((cat) => (
-        <div
-          key={cat.label}
-          className="flex items-center gap-1 rounded-md"
-          style={{ background: `${cat.color}0D`, border: `1px solid ${cat.color}22`, padding: "2px 6px" }}
-        >
-          <cat.Icon size={8} style={{ color: cat.color }} strokeWidth={2.2} />
-          <span style={{ fontSize: 7.5, fontWeight: 600, color: "var(--clpa-body-alt)" }}>{cat.label}</span>
-          <span style={{ fontSize: 7.5, fontWeight: 800, color: cat.color }}>{cat.count}</span>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-// ms -> a short, human duration label ("<1m", "42m", "2h 5m") for the real avg-response stat
-// below - plain arithmetic rather than date-fns's intervalToDuration, since this only ever needs
-// two units (hours, minutes) and never the calendar-aware month/year breakdown that helper is
-// built for.
 function formatAvgResponseDuration(ms: number): string {
   const totalMinutes = Math.round(ms / 60000);
   if (totalMinutes < 1) return "<1m";
@@ -5331,75 +5729,95 @@ function formatAvgResponseDuration(ms: number): string {
   return minutes > 0 ? `${hours}h ${minutes}m` : `${hours}h`;
 }
 
-function AAlertHistoryCard({ alerts, snoozedUntil }: { alerts: AlertItem[]; snoozedUntil: Partial<Record<string, number>> }) {
-  const { performAction } = useApp();
+function AAlertHistoryCard({
+  alerts,
+  snoozedUntil,
+  onSelect,
+  selectedId,
+}: {
+  alerts: AlertItem[];
+  snoozedUntil: Partial<Record<string, number>>;
+  onSelect: (id: string) => void;
+  selectedId?: string;
+}) {
   const resolved = alerts.filter((a) => !a.unread);
-  const history = resolved
-    .map((a) => ({
-      time: a.time,
-      text: a.title,
-      tag: "Resolved",
-      color: "var(--clpa-success)",
-      Icon: a.Icon,
-      iconColor: a.iconColor,
-      iconBg: a.iconBg,
-    }))
-    .slice(0, 4);
+  const history = resolved.slice(0, 8);
 
-  // Real average time-to-respond: creation -> acknowledge/snooze, using the genuine createdAt/
-  // resolvedAt epoch-ms pair useAlertEngine and AppContext's acknowledgeAlert/snoozeAlert now
-  // actually record (see their own comments). Sample alerts are excluded - their "time" fields
-  // are fixed display strings from app load, not a real incident timeline, so including them
-  // would silently blend fabricated data into a stat presented as measured.
   const respondedReal = resolved.filter((a) => a.source === "real" && a.resolvedAt != null);
   const avgResponseMs =
     respondedReal.length > 0
       ? respondedReal.reduce((sum, a) => sum + (a.resolvedAt! - a.createdAt), 0) / respondedReal.length
       : null;
-  const avgResponseLabel = avgResponseMs != null ? formatAvgResponseDuration(avgResponseMs) : "Not enough data yet";
-
-  // Real, live count of currently-active snoozes (not yet expired) - snoozedUntil is keyed by
-  // ruleId (snoozing an alert snoozes its underlying rule, see AppContext's snoozeAlert), so this
-  // is genuinely "how many alert conditions are suppressed right now," not a per-alert-id count
-  // that doesn't otherwise exist. Recomputed on every render off the same live snoozedUntil state
-  // useAlertEngine already expires entries from as real polls pass their window.
+  const avgResponseLabel = avgResponseMs != null ? formatAvgResponseDuration(avgResponseMs) : "—";
   const activeSnoozeCount = Object.values(snoozedUntil).filter((until) => until != null && until > Date.now()).length;
 
-  const stats: { label: string; value: string; color: string; small?: boolean }[] = [
+  const stats: { label: string; value: string; color: string }[] = [
     { label: "Resolved", value: String(resolved.length), color: "var(--clpa-success)" },
-    { label: "Avg response", value: avgResponseLabel, color: "var(--clpa-primary)", small: avgResponseMs == null },
-    { label: "Snoozed", value: String(activeSnoozeCount), color: "var(--clpa-warning)" },
+    { label: "Avg response", value: avgResponseLabel, color: "var(--clpa-primary)" },
+    { label: "Snoozed now", value: String(activeSnoozeCount), color: "var(--clpa-warning)" },
   ];
+
+  const cats = [...new Set(alerts.map((a) => a.category))];
 
   return (
     <CLPACard style={{ padding: "12px 14px" }}>
-      <CLPAHeader title="ALERT HISTORY" action="View All" onAction={() => performAction("view-all-alert-history")} />
-      <ACategoryStrip alerts={alerts} />
+      <div className="flex items-center justify-between mb-2.5">
+        <span style={{ fontSize: 11, fontWeight: 800, color: "var(--clpa-title)", letterSpacing: 0.4 }}>RESOLVED</span>
+        <span style={{ fontSize: 9, color: "var(--clpa-subtle)" }}>{history.length === 0 ? "None yet" : `Latest ${history.length}`}</span>
+      </div>
+      {cats.length > 0 && (
+        <div className="flex items-center gap-1.5 flex-wrap mb-2 pb-2" style={{ borderBottom: "1px solid var(--clpa-divider)" }}>
+          {cats.map((cat) => {
+            const CatIcon = categoryIcon(cat);
+            const n = alerts.filter((a) => a.category === cat).length;
+            return (
+              <div key={cat} className="flex items-center gap-1 rounded-md" style={{ background: "var(--clpa-surface)", border: "1px solid var(--clpa-surface-border)", padding: "2px 7px" }}>
+                <CatIcon size={9} style={{ color: "var(--clpa-muted)" }} strokeWidth={2} />
+                <span style={{ fontSize: 8, fontWeight: 600, color: "var(--clpa-body-alt)" }}>{prettyAlertCategory(cat)}</span>
+                <span style={{ fontSize: 8, fontWeight: 800, color: "var(--clpa-title)" }}>{n}</span>
+              </div>
+            );
+          })}
+        </div>
+      )}
       <div className="grid gap-1.5 mb-2" style={{ gridTemplateColumns: "repeat(3, 1fr)" }}>
         {stats.map((s) => (
-          <div key={s.label} className="rounded-lg text-center" style={{ background: "var(--clpa-surface)", border: "1px solid var(--clpa-surface-border)", padding: "6px 4px" }}>
-            <div style={{ fontSize: s.small ? 8.5 : 14, fontWeight: s.small ? 800 : 900, color: s.color, lineHeight: s.small ? 1.25 : 1 }}>{s.value}</div>
-            <div style={{ fontSize: 7.5, color: "var(--clpa-subtle)", marginTop: 2, fontWeight: 600 }}>{s.label}</div>
+          <div key={s.label} className="rounded-lg text-center" style={{ background: "var(--clpa-surface)", border: "1px solid var(--clpa-surface-border)", padding: "7px 4px" }}>
+            <div style={{ fontSize: 14, fontWeight: 900, color: s.color, lineHeight: 1 }}>{s.value}</div>
+            <div style={{ fontSize: 8, color: "var(--clpa-subtle)", marginTop: 3, fontWeight: 600 }}>{s.label}</div>
           </div>
         ))}
       </div>
       <div className="flex flex-col">
         {history.length === 0 && (
-          <div className="text-center" style={{ fontSize: 9, color: "var(--clpa-subtle)", padding: "10px 0" }}>
-            No resolved alerts yet.
+          <div className="text-center" style={{ fontSize: 9.5, color: "var(--clpa-subtle)", padding: "12px 0" }}>
+            Acknowledge an alert to see it here.
           </div>
         )}
         {history.map((item, i) => (
-          <div key={i} className="flex items-center gap-2 py-1.5" style={{ borderBottom: i < history.length - 1 ? "1px solid var(--clpa-divider)" : "none" }}>
+          <button
+            key={item.id}
+            type="button"
+            onClick={() => onSelect(item.id)}
+            className="flex items-center gap-2 py-1.5 text-left w-full"
+            style={{
+              borderBottom: i < history.length - 1 ? "1px solid var(--clpa-divider)" : "none",
+              background: item.id === selectedId ? "rgba(var(--clpa-primary-rgb),0.06)" : "transparent",
+              borderRadius: 8,
+              cursor: "pointer",
+              paddingLeft: 4,
+              paddingRight: 4,
+            }}
+          >
             <div className="flex items-center justify-center rounded-md flex-shrink-0" style={{ width: 22, height: 22, background: item.iconBg }}>
               <item.Icon size={11} style={{ color: item.iconColor }} strokeWidth={2} />
             </div>
             <div className="flex-1 min-w-0">
-              <div style={{ fontSize: 9, fontWeight: 500, color: "var(--clpa-body)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.text}</div>
-              <div style={{ fontSize: 8, color: "var(--clpa-subtle)" }}>{item.time}</div>
+              <div style={{ fontSize: 10, fontWeight: 600, color: "var(--clpa-body)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.title}</div>
+              <div style={{ fontSize: 8.5, color: "var(--clpa-subtle)" }}>{prettyAlertCategory(item.category)} · {alertRelativeTime(item)}</div>
             </div>
-            <CLPABadge label={item.tag} color={item.color} bg={`${item.color}14`} />
-          </div>
+            <CLPABadge label="Resolved" color="var(--clpa-success)" bg="rgba(var(--clpa-success-bright-rgb),0.12)" />
+          </button>
         ))}
       </div>
     </CLPACard>
@@ -6199,6 +6617,7 @@ function SSContent({ section }: { section: string }) {
   const [backendUrlDraft, setBackendUrlDraft] = useState("");
   const [enrollBusy, setEnrollBusy] = useState(false);
   const [enrollMessage, setEnrollMessage] = useState<string | null>(null);
+  const [eventRetentionDays, setEventRetentionDays] = useState<number | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -6219,6 +6638,27 @@ function SSContent({ section }: { section: string }) {
     }
     tick();
     const id = window.setInterval(tick, 5000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function tick() {
+      try {
+        const res = await fetch("http://127.0.0.1:4317/api/event-retention");
+        const body = await res.json().catch(() => null);
+        if (cancelled) return;
+        const days = Number(body?.eventRetentionDays);
+        setEventRetentionDays(Number.isFinite(days) && days > 0 ? days : null);
+      } catch {
+        if (!cancelled) setEventRetentionDays(null);
+      }
+    }
+    tick();
+    const id = window.setInterval(tick, 30000);
     return () => {
       cancelled = true;
       window.clearInterval(id);
@@ -6531,7 +6971,7 @@ function SSContent({ section }: { section: string }) {
         </SCard>
         <SCard>
           <SHead title="Compliance" />
-          <SField label="Event retention" value="90 days" />
+          <SField label="Event retention" value={eventRetentionDays != null ? `${eventRetentionDays} days` : "Not synced"} />
           <SField label="Local telemetry" value="HTTP · 127.0.0.1:4317" />
           <SField label="Plan sync" value={policySynced ? data?.entitlement?.plan ?? "Synced" : connected ? "Not synced" : "Agent offline"} />
         </SCard>
@@ -6551,7 +6991,7 @@ function SSContent({ section }: { section: string }) {
           <STextField
             label="Backend URL"
             value={backendUrlDraft || enrollment?.backendUrl || ""}
-            placeholder="http://192.168.0.32:8443"
+            placeholder="http://<command-center-ip>:8443"
             onCommit={(v) => { saveBackendUrl(v); onChange(); }}
           />
           <div style={{ fontSize: 8.5, color: "var(--clpa-subtle)", lineHeight: 1.35, marginTop: 6 }}>

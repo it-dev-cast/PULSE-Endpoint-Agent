@@ -667,6 +667,31 @@ function handleEnrollmentStatus(res) {
   res.end(JSON.stringify(enrollmentPayload()));
 }
 
+// Proxies GET /v1/event-retention - the same named constant backend pruneEventsForDevice
+// already enforces. Null (not a copied 90) when the backend is unreachable so Settings can
+// show "Not synced" instead of a second static number that would drift.
+async function handleEventRetentionProxy(res) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), BACKEND_REQUEST_TIMEOUT_MS);
+  try {
+    const backendRes = await fetch(`${BACKEND_URL}/v1/event-retention`, { signal: controller.signal });
+    const body = await backendRes.json().catch(() => null);
+    const days = Number(body?.eventRetentionDays);
+    if (!backendRes.ok || !Number.isFinite(days) || days <= 0) {
+      res.writeHead(200);
+      res.end(JSON.stringify({ eventRetentionDays: null }));
+      return;
+    }
+    res.writeHead(200);
+    res.end(JSON.stringify({ eventRetentionDays: days }));
+  } catch {
+    res.writeHead(200);
+    res.end(JSON.stringify({ eventRetentionDays: null }));
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // Real published agent version from Command Centre (GET /v1/agent/latest). The UI compares
 // this to the version baked into the running app and shows "Update available" - never a
 // hardcoded newer number. 404/unreachable → { version: null } so a missing publish file
@@ -828,7 +853,7 @@ async function handleBackendUrlUpdate(req, res) {
     const next = normalizeBackendUrl(parsed.backendUrl);
     if (!next) {
       res.writeHead(400);
-      res.end(JSON.stringify({ error: "backendUrl must be an http(s) URL, e.g. http://192.168.0.32:8443" }));
+      res.end(JSON.stringify({ error: "backendUrl must be an http(s) URL, e.g. http://<command-center-ip>:8443" }));
       return;
     }
     BACKEND_URL = next;
@@ -2598,6 +2623,11 @@ const server = createServer((req, res) => {
 
     if (req.url === "/api/agent-latest" && req.method === "GET") {
       handleAgentLatestProxy(res);
+      return;
+    }
+
+    if (req.url === "/api/event-retention" && req.method === "GET") {
+      handleEventRetentionProxy(res);
       return;
     }
 

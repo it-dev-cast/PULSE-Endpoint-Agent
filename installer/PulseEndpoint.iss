@@ -133,13 +133,21 @@ begin
   Result := Trim(ExpandConstant('{param:BACKENDURL|}'));
 end;
 
+function IsHttpBackendUrl(S: String): Boolean;
+var
+  T: String;
+begin
+  T := LowerCase(Trim(S));
+  Result := (Copy(T, 1, 7) = 'http://') or (Copy(T, 1, 8) = 'https://');
+  if Result then
+    Result := Length(T) > 10;
+end;
+
 function ResolvedBackendUrl(): String;
 begin
   Result := CmdLineBackendUrl();
   if Result = '' then
-    Result := BackendUrlPage.Values[0];
-  if Result = '' then
-    Result := 'http://localhost:8443';
+    Result := Trim(BackendUrlPage.Values[0]);
 end;
 
 function InitializeSetup(): Boolean;
@@ -151,7 +159,7 @@ begin
   BackendUrl := CmdLineBackendUrl();
   if WizardSilent then
   begin
-    if (SetupType = 'agent') and (BackendUrl = '') then
+    if (SetupType = 'agent') and (not IsHttpBackendUrl(BackendUrl)) then
     begin
       Log('Silent agent install requires /BACKENDURL=http://host:8443');
       Result := False;
@@ -163,7 +171,7 @@ procedure InitializeWizard();
 begin
   BackendUrlPage := CreateInputQueryPage(wpSelectComponents,
     'Central Backend Address', 'Where should this agent report to?',
-    'Enter the address THIS laptop can actually reach. Same Wi-Fi: http://192.168.0.32:8443. ' +
+    'Enter the address THIS laptop can actually reach, e.g. http://<command-center-ip>:8443. ' +
     'Same Tailscale account: the Command Centre PC''s 100.x address. Different Tailscale accounts: ' +
     'the Shared-in IP from THIS laptop''s Tailscale Machines page - not the IP shown on the Command Centre PC. ' +
     'Silent: /VERYSILENT /TYPE=agent /BACKENDURL=http://HOST:8443');
@@ -171,7 +179,7 @@ begin
   if CmdLineBackendUrl() <> '' then
     BackendUrlPage.Values[0] := CmdLineBackendUrl()
   else
-    BackendUrlPage.Values[0] := 'http://192.168.0.32:8443';
+    BackendUrlPage.Values[0] := '';
 end;
 
 function ShouldSkipPage(PageID: Integer): Boolean;
@@ -179,6 +187,19 @@ begin
   Result := False;
   if PageID = BackendUrlPage.ID then
     Result := WizardIsComponentSelected('backend') or WizardSilent or (CmdLineBackendUrl() <> '');
+end;
+
+function NextButtonClick(CurPageID: Integer): Boolean;
+begin
+  Result := True;
+  if CurPageID = BackendUrlPage.ID then
+  begin
+    if not IsHttpBackendUrl(BackendUrlPage.Values[0]) then
+    begin
+      MsgBox('Enter the Command Centre address this laptop can reach (http://host:8443). Agent-only install cannot guess it.', mbError, MB_OK);
+      Result := False;
+    end;
+  end;
 end;
 
 // Inno's built-in GetShortName wraps the real Win32 GetShortPathName - the same real mechanism
@@ -260,14 +281,18 @@ end;
 // correct when this same machine is genuinely both the agent and the backend.
 procedure WriteAgentConfig();
 var
-  ConfigContent, ServerDir: String;
+  ConfigContent, ServerDir, BackendUrl: String;
 begin
   if WizardIsComponentSelected('backend') then
     Exit;
 
+  BackendUrl := ResolvedBackendUrl();
+  if not IsHttpBackendUrl(BackendUrl) then
+    RaiseException('Agent-only install requires a Command Centre URL (http://host:8443). Nothing was written.');
+
   ServerDir := ExpandConstant('{app}') + '\local-agent\server';
   ConfigContent := '{' + #13#10 +
-    '  "backendUrl": "' + ResolvedBackendUrl() + '"' + #13#10 +
+    '  "backendUrl": "' + BackendUrl + '"' + #13#10 +
     '}' + #13#10;
   SaveStringToFile(ServerDir + '\pulse-agent.config.json', ConfigContent, False);
 end;

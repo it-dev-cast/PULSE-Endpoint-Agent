@@ -42,6 +42,13 @@ func handleHealth(db *DB) http.HandlerFunc {
 	}
 }
 
+// Same constant pruneEventsForDevice uses - a live readout, not a second copied number.
+func handleEventRetention() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]int{"eventRetentionDays": eventRetentionDays})
+	}
+}
+
 type registerDeviceRequest struct {
 	Hostname string `json:"hostname"`
 }

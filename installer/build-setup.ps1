@@ -113,6 +113,11 @@ $out = Join-Path $InstallerDir "output\PulseEndpointSetup.exe"
 if (-not (Test-Path $out)) { throw "Expected output missing: $out" }
 Write-Host "`nBuilt: $out"
 Write-Host "Silent agent on laptop 2 (same Wi-Fi as this Command Centre PC):"
-Write-Host "  `"$out`" /VERYSILENT /TYPE=agent /BACKENDURL=http://192.168.0.32:8443"
+Write-Host "  `"$out`" /VERYSILENT /TYPE=agent /BACKENDURL=http://<command-center-ip>:8443"
 Write-Host "If Tailscale accounts differ, use the Shared-in 100.x IP from laptop 2's Machines page, not this PC's own tailscale ip."
+
+Step "Publish agent-release.json so running endpoints see Update available"
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $InstallerDir "publish-agent-release.ps1")
+if ($LASTEXITCODE -ne 0) { throw "publish-agent-release.ps1 failed" }
+
 Remove-Item $SkipRelaunch -Force -ErrorAction SilentlyContinue

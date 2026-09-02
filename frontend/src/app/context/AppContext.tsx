@@ -316,7 +316,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const markAllAlertsRead = useCallback(() => {
-    setAlerts((prev) => prev.map((a) => ({ ...a, unread: false })));
+    const now = Date.now();
+    setAlerts((prev) => prev.map((a) => ({ ...a, unread: false, resolvedAt: a.resolvedAt ?? now })));
     toast.success("All alerts marked as read");
   }, []);
 
@@ -440,71 +441,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const performAction = useCallback(
-    (action: string, label?: string) => {
-      const display = label ?? action.replace(/-/g, " ");
-      const handlers: Record<string, () => void> = {
-        "view-all-predictions": () => toast.info("Opening full predictions list"),
-        "view-all-recommendations": () => toast.info("Opening AI recommendations"),
-        "view-all-insights": () => toast.info("Opening AI insights"),
-        "view-all-upgrade": () => toast.info("Opening upgrade advisor"),
-        // Honest, not a fabricated completion claim - there is no real driver-scan capability
-        // anywhere in this app or the backend (confirmed directly - no such endpoint exists), so
-        // this can't honestly report a real result the way refreshSync's own "Data refreshed"
-        // toast can. refreshSync() itself stays (it's a real, if trivial, side effect - bumping
-        // the last-synced timestamp), only the fabricated "up to date" claim is removed.
-        "rescan-hardware": () => {
-          refreshSync();
-          toast.info("Driver scan isn't available yet - no real scan ran.");
-        },
-        // Same reasoning as rescan-hardware above - neither of these has any real backing
-        // (no warranty-renewal or document-storage system exists anywhere in this project), so
-        // both get an honest "not available" message instead of the fake completion claims they
-        // used to fall through to (the generic default toast, using whatever label string the
-        // button happened to pass in).
-        "extend-warranty": () => toast.info("Warranty extension isn't available yet - no request was actually sent."),
-        "view-warranty-documents": () => toast.info("Warranty documents aren't available yet - nothing was opened."),
-        "view-all-lifecycle": () => toast.info("Opening component lifecycle"),
-        "view-all-timeline": () => toast.info("Opening hardware timeline"),
-        "view-all-transactions": () => toast.info("Opening transaction history"),
-        "view-usage-details": () => toast.info("Opening usage details"),
-        "view-all-alert-history": () => toast.info("Opening alert history"),
-        "view-all-alert-insights": () => toast.info("Opening alert insights"),
-        "view-full-ticket": () => toast.info("Opening ticket #CLPA-72891"),
-        "remote-actions": () => toast.info("Session actions menu opened"),
-        "remote-request-access": () => toast.success("Access request sent to customer"),
-        "remote-consent-log": () => toast.info("Opening consent log"),
-        "remote-execute": () => {
-          toast.success("AI fix queued — running in background");
-          refreshSync();
-        },
-        "remote-explain": () => toast.info("Driver update will resolve WLAN disconnects during VoIP"),
-        "remote-tool-diagnostics": () => toast.success("Diagnostics toolkit opened"),
-        "remote-tool-event-logs": () => toast.success("Event logs opened"),
-        "remote-tool-network": () => toast.success("Network analyzer opened"),
-        "remote-tool-terminal": () => toast.success("Secure terminal opened"),
-        "apply-alert-suggestions": () => {
-          toast.success("AI suggestions applied");
-          refreshSync();
-        },
-        "manage-alert-rules": () => navigate("settings"),
-        "settings-reset": () => {
-          resetAllSettings();
-        },
-        "reset-agent": () => toast.warning("Agent reset scheduled — restart required"),
-        "org-switch": () => toast.info("Organization switcher opened"),
-        "user-menu": () => setSupportChatOpen(true),
-      };
-
-      const remoteControlMap: Record<string, string> = {
-        screen: "Screen share connecting",
-        control: "Remote control enabled",
-        voice: "Voice channel connected",
-        chat: "Session chat opened",
-        file: "File transfer ready",
-        record: "Session recording started",
-        more: "More actions opened",
-      };
-
+    (action: string) => {
       if (action === "start-remote-session") {
         startRemoteSession();
         return;
@@ -513,20 +450,19 @@ export function AppProvider({ children }: { children: ReactNode }) {
         endRemoteSession();
         return;
       }
-      if (action.startsWith("remote-control-")) {
-        const key = action.replace("remote-control-", "");
-        toast.success(remoteControlMap[key] ?? `${display} activated`);
+      if (action === "manage-alert-rules") {
+        navigate("settings");
         return;
       }
-
-      const handler = handlers[action];
-      if (handler) {
-        handler();
+      if (action === "settings-reset") {
+        resetAllSettings();
         return;
       }
-      toast.success(display);
+      if (action === "user-menu") {
+        setSupportChatOpen(true);
+      }
     },
-    [endRemoteSession, navigate, refreshSync, startRemoteSession, resetAllSettings],
+    [endRemoteSession, navigate, startRemoteSession, resetAllSettings],
   );
 
   useEffect(() => {

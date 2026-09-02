@@ -109,6 +109,10 @@ func main() {
 
 	r.Route("/v1", func(r chi.Router) {
 		r.Get("/health", handleHealth(db))
+		// No auth - this is the same named retention policy pruneEventsForDevice already
+		// enforces (eventRetentionDays in models.go). Agents need it for an honest Settings
+		// readout; it is not a secret.
+		r.Get("/event-retention", handleEventRetention())
 		r.Post("/devices/register", handleRegisterDevice(db))
 		r.Post("/auth/login", handleLogin(adminPasswordHash, jwtSecret))
 		// No auth - a public key is not a secret by definition. Lets local-agent verify an ADE
