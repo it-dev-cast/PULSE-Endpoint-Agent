@@ -18,17 +18,38 @@ import (
 // Looked up in this order so a Scheduled Task whose cwd is %ProgramData%\Pulse Endpoint\backend
 // (see start-command-center.cmd) can be updated by editing the file there, without touching
 // the source tree:
-//   1. %ProgramData%\Pulse Endpoint\backend\agent-release.json
-//   2. agent-release.json in the process working directory
-//   3. agent-release.json next to command-center.exe
+//  1. %ProgramData%\Pulse Endpoint\backend\agent-release.json
+//  2. agent-release.json in the process working directory
+//  3. agent-release.json next to command-center.exe
+//
+// Sha256/Sequence/Ring/Signature are PRD Section 31 Self-Update v1 additions - written by the
+// offline sign-release tool at publish time (see cmd/sign-release), never by command-center.exe
+// itself. This service only ever passes them through verbatim; it has no reason to verify the
+// signature itself (it isn't the one deciding whether to trust and install a release - the agent
+// is), and doesn't hold the private key needed to produce one. Tolerant of a release file that
+// predates these fields (Sequence/Sha256 zero-valued, Signature/Ring empty) rather than failing
+// to parse - the agent's own verification simply refuses to update against an unsigned manifest,
+// the same fail-closed posture as everywhere else self-update touches.
 type agentReleaseFile struct {
 	Version   string `json:"version"`
 	Installer string `json:"installer"`
+	Sha256    string `json:"sha256"`
+	Sequence  int64  `json:"sequence"`
+	Ring      string `json:"ring"`
+	Signature string `json:"signature"`
 }
 
 type agentLatestResponse struct {
 	Version     string `json:"version"`
 	DownloadURL string `json:"downloadUrl,omitempty"`
+	// Installer (the filename, not a URL) is part of what's actually signed - the agent needs it
+	// verbatim to reconstruct the exact canonical payload cmd/sign-release signed. See
+	// handleAgentLatest's own comment on why the signature covers this, not downloadUrl.
+	Installer string `json:"installer,omitempty"`
+	Sha256    string `json:"sha256,omitempty"`
+	Sequence  int64  `json:"sequence,omitempty"`
+	Ring      string `json:"ring,omitempty"`
+	Signature string `json:"signature,omitempty"`
 }
 
 func agentReleaseSearchPaths() []string {
@@ -129,7 +150,20 @@ func handleAgentLatest() http.HandlerFunc {
 			writeError(w, http.StatusNotFound, "no agent release published")
 			return
 		}
-		out := agentLatestResponse{Version: rel.Version}
+		out := agentLatestResponse{
+			Version:   rel.Version,
+			Installer: rel.Installer,
+			Sha256:    rel.Sha256,
+			Sequence:  rel.Sequence,
+			Ring:      rel.Ring,
+			// Signature covers "version:sha256:sequence:ring:installer" (see cmd/sign-release) -
+			// never the downloadUrl below, which is a per-request-computed convenience field
+			// (varies with the request's own Host header, so it could never be part of a stable
+			// signed artifact) rather than the thing actually being authenticated. The agent's
+			// real trust question is "is this exact file, by hash, genuinely this version" - the
+			// URL is just transport.
+			Signature: rel.Signature,
+		}
 		if resolveInstallerPath(rel, jsonDir) != "" {
 			out.DownloadURL = publicBackendOrigin(r) + "/v1/agent/download"
 		}
@@ -137,8 +171,56 @@ func handleAgentLatest() http.HandlerFunc {
 	}
 }
 
+// sanitizeVersionParam guards resolveInstallerPathForVersion below against path traversal via
+// ?version= (e.g. "../../../windows/system32/whatever") - only characters a real version string
+// could ever contain are allowed through to become part of a filesystem path.
+func sanitizeVersionParam(v string) string {
+	v = strings.TrimSpace(strings.TrimPrefix(v, "v"))
+	for _, r := range v {
+		if !(r >= '0' && r <= '9' || r == '.' || r == '-') {
+			return ""
+		}
+	}
+	return v
+}
+
+// resolveInstallerPathForVersion is the manual-rollback path (PRD Section 31, "keep the
+// last-known-good installer accessible") - publish-agent-release.ps1 now retains every past
+// version's installer under a version-specific filename in releases/ rather than overwriting the
+// same name each publish, so a human can fetch any past release directly, not just the current
+// one agent-release.json happens to point at.
+func resolveInstallerPathForVersion(version string) string {
+	version = sanitizeVersionParam(version)
+	if version == "" {
+		return ""
+	}
+	name := "PulseEndpointSetup-" + version + ".exe"
+	for _, jsonPath := range agentReleaseSearchPaths() {
+		abs, err := filepath.Abs(jsonPath)
+		if err != nil {
+			continue
+		}
+		candidate := filepath.Join(filepath.Dir(abs), "releases", name)
+		if st, err := os.Stat(candidate); err == nil && !st.IsDir() {
+			return candidate
+		}
+	}
+	return ""
+}
+
 func handleAgentDownload() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if v := r.URL.Query().Get("version"); v != "" {
+			path := resolveInstallerPathForVersion(v)
+			if path == "" {
+				writeError(w, http.StatusNotFound, "that version's installer is not available")
+				return
+			}
+			w.Header().Set("Content-Disposition", `attachment; filename="`+filepath.Base(path)+`"`)
+			http.ServeFile(w, r, path)
+			return
+		}
+
 		rel, jsonDir, ok := loadAgentRelease()
 		if !ok {
 			writeError(w, http.StatusNotFound, "no agent release published")

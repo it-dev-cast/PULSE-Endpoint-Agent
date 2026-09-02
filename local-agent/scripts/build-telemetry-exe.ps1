@@ -22,20 +22,60 @@
 
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot   # local-agent/
+$repoRoot = Split-Path -Parent $root
 $serverDir = Join-Path $root "server"
 $mjsPath = Join-Path $serverDir "telemetry-server.mjs"
 $cjsPath = Join-Path $serverDir "telemetry-server.cjs"
 $blobPath = Join-Path $serverDir "telemetry-server.blob"
 $seaConfigPath = Join-Path $serverDir "sea-config.json"
 $exePath = Join-Path $serverDir "telemetry-server.exe"
+$esbuildRunnerPath = Join-Path $serverDir ".esbuild-runner-tmp.cjs"
+
+# PRD Section 31 Self-Update v1 - the agent needs to know its OWN installed version to compare
+# against a published manifest's version, and there's no other real source for that at runtime
+# (APP_VERSION in the Tauri app is a build-time constant from this same file, read the same way -
+# see publish-agent-release.ps1's own comment). __AGENT_VERSION__ is a bare identifier in the
+# source, only meaningful after esbuild's --define below substitutes it - telemetry-server.mjs
+# reads it via `typeof __AGENT_VERSION__ !== "undefined" ? __AGENT_VERSION__ : null` specifically
+# so running unbundled from source (plain `node telemetry-server.mjs`, dev mode) evaluates to
+# null instead of throwing a ReferenceError on a truly undeclared identifier - self-update checks
+# are skipped entirely (logged once) when this is null, rather than guessing either way.
+$packageJsonPath = Join-Path $repoRoot "frontend\package.json"
+if (-not (Test-Path $packageJsonPath)) { throw "frontend/package.json not found: $packageJsonPath" }
+$agentVersion = ([string](Get-Content $packageJsonPath -Raw | ConvertFrom-Json).version).Trim().TrimStart("v")
+if (-not $agentVersion) { throw "frontend/package.json has no version" }
+Write-Host "[build] Baking in AGENT_VERSION=$agentVersion (from frontend/package.json)..."
 
 Write-Host "[build] Bundling ESM -> CJS with esbuild..."
+# Real bug found live: esbuild's CLI --define value needs embedded double quotes (a JS string
+# literal, since __AGENT_VERSION__ must resolve to a string) - passing that through
+# `npx esbuild ...` from PowerShell silently loses the quotes somewhere in npx's own argument
+# relay to the native esbuild.exe binary (confirmed directly: the value arrives unquoted, which
+# esbuild then rejects as "not an entity name or valid JSON syntax"). Calling esbuild's JS API
+# from a small script file instead sidesteps this whole class of shell-argument-quoting fragility
+# - the version is passed as a real JS value, never serialized through a command-line string at
+# all. Written to a real file (not `node -e "..."`) since a large inline script hits the same
+# quoting risk `-e`'s own argument would have.
+$esbuildRunner = @'
+const esbuild = require("esbuild");
+esbuild.buildSync({
+  entryPoints: [process.argv[2]],
+  bundle: true,
+  platform: "node",
+  format: "cjs",
+  outfile: process.argv[3],
+  external: ["node:*"],
+  define: { __AGENT_VERSION__: JSON.stringify(process.argv[4]) },
+});
+'@
+Set-Content -Path $esbuildRunnerPath -Value $esbuildRunner -Encoding utf8
 Push-Location $root
 try {
-    & npx esbuild $mjsPath --bundle --platform=node --format=cjs --outfile=$cjsPath --external:node:*
+    & node $esbuildRunnerPath $mjsPath $cjsPath $agentVersion
     if ($LASTEXITCODE -ne 0) { throw "esbuild failed with exit code $LASTEXITCODE" }
 } finally {
     Pop-Location
+    Remove-Item -Path $esbuildRunnerPath -Force -ErrorAction SilentlyContinue
 }
 
 Write-Host "[build] Writing sea-config.json..."

@@ -1,5 +1,5 @@
 import { createServer } from "node:http";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import fs from "node:fs";
@@ -67,6 +67,34 @@ const BACKEND_REQUEST_TIMEOUT_MS = 15000;
 // Persisted once per device, reused across restarts rather than re-registering every time -
 // gitignored (see .gitignore) since it holds a real, live API key, not a placeholder.
 const DEVICE_CREDENTIALS_PATH = path.join(__dirname, ".device-credentials.json");
+
+// PRD Section 31 Self-Update v1. AGENT_VERSION is this build's own installed version - baked in
+// by build-telemetry-exe.ps1 via esbuild's --define (see that script's own comment); typeof-
+// guarded so running unbundled from source doesn't throw on a genuinely undeclared identifier -
+// it safely resolves to null instead, and every self-update check is skipped entirely (logged
+// once) rather than guessing whether an update is needed with no real version to compare against.
+const AGENT_VERSION = typeof __AGENT_VERSION__ !== "undefined" ? __AGENT_VERSION__ : null;
+
+// The real Casterly release-signing public key (Ed25519) - deliberately embedded here, baked into
+// the build, rather than fetched from the backend at runtime the way the ADE approval-token
+// public key is (see getBackendPublicKey below). That's fine for approval tokens (the device
+// already trusts the backend to decide approve/reject; handing over the right key adds no new
+// risk), but would defeat the entire point of a separate release-signing trust root - a
+// compromised backend could otherwise swap this key and a malicious manifest/signature together,
+// and the "verification" would prove nothing. See backend/cmd/gen-release-key's own comment for
+// where the matching private key lives (never on any device) and
+// installer/publish-agent-release.ps1 for how it signs what this verifies.
+const RELEASE_PUBLIC_KEY_B64 = "UjQeOVEt9lKOzZlf9JFd6jXoiT+1xtjv1RFfGbpK43Q=";
+
+// Real, persisted anti-replay state (PRD Section 31.2 Step 4) - plain, unencrypted JSON, not
+// DPAPI-protected like DEVICE_CREDENTIALS_PATH. A sequence number isn't a secret, and DPAPI's
+// LocalMachine scope (see protectCredentials's own comment) wouldn't meaningfully protect it from
+// an attacker who already has local write access to this device anyway - decryptable by any
+// process on the same machine. This genuinely protects against network-level replay (an old,
+// validly-signed manifest served again by a compromised/reverted mirror); it does NOT protect
+// against a local attacker rolling this specific file back - that stronger guarantee is what a
+// future TPM-sealed counter would add, deliberately deferred for this v1 (disclosed, not hidden).
+const SELF_UPDATE_STATE_PATH = path.join(__dirname, ".self-update-state.json");
 // Entitlement/heartbeat don't need the same 5s cadence as hardware telemetry - a subscription
 // plan or last-seen timestamp doesn't change fast enough to justify polling it 12x/minute, and
 // this is a separate named interval specifically so that policy is visible and adjustable in
@@ -1706,6 +1734,237 @@ async function handleHighImpactCheckProxy(req, res) {
   res.end(JSON.stringify({ status: "approved", verified: true, executed: true }));
 }
 
+// ─── PRD §31 Self-Update v1 ────────────────────────────────
+// Real, signed, verified, anti-replay-protected self-update - distinct from the older
+// "Update available" badge in the Tauri app (App.tsx's useAgentUpdate), which only ever shows a
+// human a manual download link. This is the actual PRD Section 31 mechanism: verify signature ->
+// verify sequence is newer -> verify SHA-256 of the downloaded installer -> invoke it silently ->
+// self-confirm on next successful heartbeat. Automatic health-based rollback is explicitly NOT
+// built here (see the investigation this was scoped from) - a device that never confirms is
+// exactly a device that goes silent, which existing offline-detection already surfaces; a human
+// re-running a retained past installer (see backend's resolveInstallerPathForVersion) is this
+// v1's real, honest recovery path, not an automated one.
+
+let selfUpdateInProgress = false; // in-memory guard - see checkAndApplySelfUpdate's own comment
+let pendingUpdateConfirmation = null; // set at startup if .self-update-state.json has one waiting
+
+function loadSelfUpdateState() {
+  try {
+    return JSON.parse(fs.readFileSync(SELF_UPDATE_STATE_PATH, "utf8"));
+  } catch {
+    return {};
+  }
+}
+
+function saveSelfUpdateState(state) {
+  try {
+    fs.writeFileSync(SELF_UPDATE_STATE_PATH, JSON.stringify(state, null, 2));
+  } catch (err) {
+    console.error("[telemetry] failed to persist self-update state:", err.message);
+  }
+}
+
+// Real, at startup (module load, not inside any cycle) - if the LAST process to run left a
+// pendingUpdate marker, this process is very likely the freshly-restarted result of that update
+// (the installer stops and relaunches this exact process as part of its own already-existing
+// upgrade path - see PulseEndpoint.iss's CurStepChanged). Confirmed, not assumed: only once THIS
+// process's own first heartbeat cycle actually succeeds (see runBackendCycle below) - a process
+// that starts but can never reach the backend has not proven anything about the update's success.
+(function primeSelfUpdateConfirmation() {
+  const state = loadSelfUpdateState();
+  if (state.pendingUpdate) {
+    pendingUpdateConfirmation = state.pendingUpdate;
+    console.log(
+      `[telemetry] found a pending self-update confirmation (v${state.pendingUpdate.fromVersion} -> v${state.pendingUpdate.toVersion}, sequence ${state.pendingUpdate.sequence}) - will confirm on first successful heartbeat.`,
+    );
+  }
+})();
+
+// Real, once - runs on this process's first successful backend cycle after a self-update, not
+// tied to any specific N-minute deadline (see this section's own top comment on why an
+// unconfirmed device is left to existing offline-detection rather than a new timeout mechanism).
+function confirmSelfUpdateIfPending() {
+  if (!pendingUpdateConfirmation) return;
+  const { fromVersion, toVersion, sequence } = pendingUpdateConfirmation;
+  logEvent(
+    "self-update-succeeded",
+    `Agent updated v${fromVersion} -> v${toVersion} (sequence ${sequence}) and confirmed itself reachable after restart.`,
+    "info",
+  );
+  console.log(`[telemetry] self-update to v${toVersion} confirmed.`);
+  pendingUpdateConfirmation = null;
+  const state = loadSelfUpdateState();
+  delete state.pendingUpdate;
+  saveSelfUpdateState(state);
+}
+
+// Positive if a is newer than b, negative if older, 0 if equal, null if either side isn't a real
+// dotted version. A separate implementation from App.tsx's compareAgentVersions (that's a
+// different project this one can't import from) but intentionally identical semantics.
+function compareAgentVersions(a, b) {
+  const parse = (v) => {
+    const parts = String(v ?? "").trim().replace(/^v/i, "").split(".").map((p) => Number.parseInt(p, 10));
+    return parts.length === 0 || parts.some((n) => Number.isNaN(n) || n < 0) ? null : parts;
+  };
+  const left = parse(a);
+  const right = parse(b);
+  if (!left || !right) return null;
+  const len = Math.max(left.length, right.length);
+  for (let i = 0; i < len; i++) {
+    const diff = (left[i] ?? 0) - (right[i] ?? 0);
+    if (diff !== 0) return diff;
+  }
+  return 0;
+}
+
+let cachedReleasePublicKey = null; // A crypto.KeyObject, built once from the embedded constant.
+
+function getReleasePublicKey() {
+  if (cachedReleasePublicKey) return cachedReleasePublicKey;
+  const raw = Buffer.from(RELEASE_PUBLIC_KEY_B64, "base64");
+  cachedReleasePublicKey = crypto.createPublicKey({ key: wrapEd25519PublicKeyAsSpki(raw), format: "der", type: "spki" });
+  return cachedReleasePublicKey;
+}
+
+// Rebuilds the exact same canonical payload backend/cmd/sign-release signed - must match
+// releasePayload() there byte-for-byte, same delimited-string convention as approvalTokenPayload
+// above and for the same reason (no cross-language JSON key-order/whitespace ambiguity).
+function releaseManifestPayload(manifest) {
+  return Buffer.from(`${manifest.version}:${manifest.sha256}:${manifest.sequence}:${manifest.ring}:${manifest.installer}`, "utf8");
+}
+
+function verifyReleaseManifestSignature(manifest) {
+  if (!manifest.version || !manifest.sha256 || !manifest.sequence || !manifest.installer || !manifest.signature) {
+    return { valid: false, reason: "manifest is missing a required signed field" };
+  }
+  let signatureValid;
+  try {
+    signatureValid = crypto.verify(null, releaseManifestPayload(manifest), getReleasePublicKey(), Buffer.from(manifest.signature, "base64"));
+  } catch (err) {
+    return { valid: false, reason: `signature verification threw: ${err.message}` };
+  }
+  return signatureValid ? { valid: true } : { valid: false, reason: "signature does not match - manifest is tampered or unsigned" };
+}
+
+async function fetchLatestReleaseManifest() {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), BACKEND_REQUEST_TIMEOUT_MS);
+  try {
+    const res = await fetch(`${BACKEND_URL}/v1/agent/latest`, { signal: controller.signal });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+async function downloadInstaller(downloadUrl) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 120000); // a real installer download, not a small API call - 15s would be far too tight
+  try {
+    const res = await fetch(downloadUrl, { signal: controller.signal });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return Buffer.from(await res.arrayBuffer());
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+// Launches the verified installer fully detached (not awaited to completion) - this process is
+// very likely to be killed shortly by the installer's own existing stop-everything step (see
+// PulseEndpoint.iss's CurStepChanged, already real and tested), which is expected, not a bug. The
+// pendingUpdate marker is written BEFORE launching so intent survives even if this process dies
+// before the spawn call itself finishes.
+function launchSilentInstall(installerPath, fromVersion, manifest) {
+  saveSelfUpdateState({
+    pendingUpdate: { fromVersion, toVersion: manifest.version, sequence: manifest.sequence, startedAt: new Date().toISOString() },
+  });
+  const child = spawn(installerPath, ["/VERYSILENT", "/TYPE=agent", `/BACKENDURL=${BACKEND_URL}`], {
+    detached: true,
+    stdio: "ignore",
+  });
+  child.unref();
+  logEvent(
+    "self-update-started",
+    `Downloaded and verified v${manifest.version} (sequence ${manifest.sequence}) - launching silent install. This device's next heartbeat after restart confirms success.`,
+    "info",
+  );
+}
+
+// The one real entry point, called once per backend cycle (see runBackendCycle below) - verify
+// signature -> verify sequence is strictly newer than the last one this device ever accepted ->
+// download -> verify SHA-256 -> persist the new sequence -> install. Each step is a real,
+// separate rejection reason, logged as its own event rather than a single generic failure,
+// since an operator investigating a device that never updated needs to know WHICH of these
+// actually happened.
+async function checkAndApplySelfUpdate() {
+  if (AGENT_VERSION == null) return; // unbundled dev run - see AGENT_VERSION's own comment
+  if (selfUpdateInProgress) return; // already launched an install this process's lifetime
+  if (pendingUpdateConfirmation) return; // waiting to confirm a just-applied update first
+
+  const manifest = await fetchLatestReleaseManifest();
+  if (!manifest || !manifest.version) return;
+
+  if (compareAgentVersions(manifest.version, AGENT_VERSION) <= 0) return; // not newer, or unparseable - nothing to do
+  if (!manifest.downloadUrl) return; // published but no installer file resolvable server-side yet
+
+  const sigVerdict = verifyReleaseManifestSignature(manifest);
+  if (!sigVerdict.valid) {
+    logEvent("self-update-rejected", `Rejected v${manifest.version}: ${sigVerdict.reason}.`, "critical");
+    return;
+  }
+
+  // Real anti-replay (PRD Section 31.2 Step 4) - strictly greater than the last sequence this
+  // device has ever accepted, persisted across restarts. A validly-signed manifest that's merely
+  // OLD (sequence <= last accepted) is rejected exactly the same as an unsigned one - a genuine
+  // release the fleet already moved past, or a replayed one, look identical from here, and both
+  // are correctly refused.
+  const state = loadSelfUpdateState();
+  const lastAccepted = state.lastAcceptedSequence ?? 0;
+  if (manifest.sequence <= lastAccepted) {
+    logEvent(
+      "self-update-rejected",
+      `Rejected v${manifest.version}: sequence ${manifest.sequence} is not newer than the last accepted sequence ${lastAccepted} (replay or already-superseded release).`,
+      "critical",
+    );
+    return;
+  }
+
+  selfUpdateInProgress = true;
+  try {
+    let installerBytes;
+    try {
+      installerBytes = await downloadInstaller(manifest.downloadUrl);
+    } catch (err) {
+      logEvent("self-update-rejected", `Rejected v${manifest.version}: download failed (${err.message}).`, "warning");
+      return;
+    }
+
+    const actualSha256 = crypto.createHash("sha256").update(installerBytes).digest("hex");
+    if (actualSha256 !== manifest.sha256) {
+      logEvent(
+        "self-update-rejected",
+        `Rejected v${manifest.version}: downloaded installer's real SHA-256 (${actualSha256}) does not match the signed manifest's (${manifest.sha256}) - corrupted download or tampered file.`,
+        "critical",
+      );
+      return;
+    }
+
+    // Persisted now, before install - anti-replay is about having accepted this manifest as
+    // genuine, a separate concern from whether the install itself later succeeds (see this
+    // section's own top comment on why install-success confirmation is a distinct later step).
+    saveSelfUpdateState({ ...state, lastAcceptedSequence: manifest.sequence });
+
+    const tempInstallerPath = path.join(os.tmpdir(), `PulseEndpointSelfUpdate-${manifest.version}.exe`);
+    fs.writeFileSync(tempInstallerPath, installerBytes);
+    launchSilentInstall(tempInstallerPath, AGENT_VERSION, manifest);
+  } finally {
+    selfUpdateInProgress = false;
+  }
+}
+
 async function fetchEntitlement(credentials) {
   try {
     const controller = new AbortController();
@@ -2166,6 +2425,20 @@ async function runBackendCycle() {
     } catch (err) {
       console.error("[telemetry] runPendingCommandIfAny failed:", err.message);
     }
+  }
+
+  // PRD §31 Self-Update v1 - a real, successful heartbeat is this process's own proof it's
+  // reachable post-restart (see confirmSelfUpdateIfPending's own comment on why that's the real
+  // health check here, not a timer). Checked before looking for a NEW update below, so a process
+  // still confirming a just-applied one never also tries to start another.
+  if (heartbeat?.ok) {
+    confirmSelfUpdateIfPending();
+  }
+
+  try {
+    await checkAndApplySelfUpdate();
+  } catch (err) {
+    console.error("[telemetry] checkAndApplySelfUpdate failed:", err.message);
   }
 
   const outcome = entitlement ? "ok" : "unavailable";

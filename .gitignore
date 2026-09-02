@@ -14,6 +14,7 @@ __pycache__/
 .env.*
 !.env.example
 signing-key.json
+release-signing-key.json
 *.pem
 .device-credentials.json
 .metric-snapshot-state.json

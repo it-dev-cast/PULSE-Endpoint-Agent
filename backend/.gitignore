@@ -1,5 +1,6 @@
 .env.local
 signing-key.json
+release-signing-key.json
 command-center.exe
 command-center.db
 command-center.db-shm
