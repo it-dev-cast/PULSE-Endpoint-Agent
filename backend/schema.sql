@@ -128,9 +128,9 @@ CREATE TABLE IF NOT EXISTS approval_requests (
 
 CREATE INDEX IF NOT EXISTS idx_approval_requests_device_id ON approval_requests(device_id);
 
--- PRD §9 Self-Healing - real v1 remote dispatch for the 3 already-built remediation actions
--- (flush-dns/clean-temp/restart-service, see telemetry-server.mjs's own PRD §9 comment). An
--- admin enqueues one here; the device discovers it on its own next heartbeat poll (see
+-- PRD §9 Self-Healing - real v1 remote dispatch for the 4 already-built remediation actions
+-- (flush-dns/clean-temp/restart-service/clear-teams-cache, see telemetry-server.mjs's own PRD §9
+-- comment). An admin enqueues one here; the device discovers it on its own next heartbeat poll (see
 -- handleHeartbeat's own comment), executes it through the exact same REMEDIATION_ACTIONS handlers
 -- the local "Run Now" button already uses, and reports the real outcome back via
 -- handleCompleteCommand - which also, unchanged, still fires the same remediation-succeeded/

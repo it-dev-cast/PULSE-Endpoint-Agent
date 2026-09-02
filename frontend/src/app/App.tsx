@@ -6239,15 +6239,17 @@ const SS_SECTIONS = [
 // Real remediation actions, gated by a real policy check (this tenant's plan_features.Self-
 // Healing row - see backend/schema.sql for why it's currently false for ProSupport), executed
 // by local-agent (the only process with real OS access) and logged to the same real events
-// table AI Intel's Timeline already reads. Deliberately not built: Clear Teams cache/Repair
+// table AI Intel's Timeline already reads. Clear Teams cache confirmed real via direct
+// investigation (new Teams/MSIX genuinely installed here). Deliberately still not built: Repair
 // VPN/OS diagnostic trigger/Certificate renewal - see telemetry-server.mjs's own comment for why
 // each stays honestly unbuilt rather than faked.
-type RemediationActionId = "flush-dns" | "clean-temp" | "restart-service";
+type RemediationActionId = "flush-dns" | "clean-temp" | "restart-service" | "clear-teams-cache";
 
 const REMEDIATION_ACTIONS_UI: { id: RemediationActionId; label: string; description: string }[] = [
   { id: "flush-dns", label: "Flush DNS Cache", description: "Real ipconfig /flushdns on this device." },
   { id: "clean-temp", label: "Clean Temp Files", description: "Real deletion of files directly in this device's %TEMP% folder (not subdirectories) - locked/in-use files are skipped, not an error." },
   { id: "restart-service", label: "Restart Print Spooler Service", description: "Real restart of this device's Windows Print Spooler service - chosen because it's safe and unrelated to this project's own processes." },
+  { id: "clear-teams-cache", label: "Clear Teams Cache", description: "Real stop of running Teams processes, then deletion of this device's Teams (new Teams/MSIX) LocalCache files - reports \"not installed\" honestly if this device doesn't have Teams." },
 ];
 
 type RemediationRunState = { running: boolean; result: string | null; succeeded: boolean | null };
@@ -6259,6 +6261,7 @@ function SSAutomationSection() {
     "flush-dns": REMEDIATION_IDLE_STATE,
     "clean-temp": REMEDIATION_IDLE_STATE,
     "restart-service": REMEDIATION_IDLE_STATE,
+    "clear-teams-cache": REMEDIATION_IDLE_STATE,
   });
   const { events } = useEventHistory(50);
 

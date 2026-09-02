@@ -1121,12 +1121,17 @@ async function handleEventsListProxy(req, res) {
 }
 
 // ─── PRD §9 Self-Healing & Automation - real v1 ────────────
-// Real policy gate + 3 real, safe remediation actions, gated on the tenant's actual
+// Real policy gate + 4 real, safe remediation actions, gated on the tenant's actual
 // plan_features.Self-Healing row (backend/schema.sql) - currently false for this tenant's
-// ProSupport plan (see that schema's own reasoning comment). Deliberately NOT built: Clear
-// Teams cache (Teams may not be installed), Repair VPN (none configured), OS diagnostic/BSOD
-// trigger (no real crash-monitoring pipeline exists), Certificate renewal (needs real PKI/SCEP
-// infrastructure) - these stay honestly unbuilt rather than faked.
+// ProSupport plan (see that schema's own reasoning comment). Clear Teams cache confirmed real
+// via direct investigation (new Teams/MSIX genuinely installed and running on this machine, real
+// LocalCache path verified on disk) - runClearTeamsCache below still treats a device where Teams
+// isn't installed as a real, reported failure, not an assumption every fleet device has it.
+// Deliberately still NOT built: Repair VPN (no VPN configured anywhere in this fleet to build or
+// test against), OS diagnostic/BSOD trigger (Windows Error Reporting is real and active here, but
+// has never recorded an actual crash/bugcheck on this device - nothing real to detect yet),
+// Certificate renewal (no PKI/SCEP infrastructure exists anywhere in this project) - these stay
+// honestly unbuilt rather than faked.
 
 // A fresh check on every remediation request, not a read of entitlementState (which only
 // refreshes every BACKEND_POLL_INTERVAL_MS/60s) - a policy gate that could act on a stale
@@ -1432,10 +1437,67 @@ async function runRestartService() {
   };
 }
 
+// New Teams (MSIX) - confirmed via direct investigation to be what's actually installed here
+// (classic Teams' %APPDATA%\Microsoft\Teams does not exist on this machine). The real per-user
+// cache lives under the package's own LocalCache, not AppData\Roaming the way classic Teams' did -
+// confirmed directly via Get-ChildItem that this exact path has real content on disk before
+// writing this. Processes are stopped first (Stop-Process, not just deleting into a live cache -
+// files are locked while Teams runs, the same reason runRestartService above has to check status
+// after its own restart rather than assume). Deletion is per-file with its own try/catch, same
+// pattern as TEMP_CLEANUP_SCRIPT above and for the same reason: a locked/in-use file mid-cleanup
+// is expected, not an error, and shouldn't abort the rest of a real count.
+const TEAMS_CACHE_CLEAR_SCRIPT = `
+$procs = Get-Process -Name "ms-teams*" -ErrorAction SilentlyContinue
+$stoppedCount = ($procs | Measure-Object).Count
+if ($procs) {
+  $procs | Stop-Process -Force -ErrorAction SilentlyContinue
+  Start-Sleep -Milliseconds 1500
+}
+$cacheDir = "$env:LOCALAPPDATA\\Packages\\MSTeams_8wekyb3d8bbwe\\LocalCache"
+if (-not (Test-Path $cacheDir)) {
+  [PSCustomObject]@{ installed = $false; stoppedCount = $stoppedCount; deletedCount = 0; skippedCount = 0; freedBytes = 0; targetDir = $cacheDir } | ConvertTo-Json -Compress
+} else {
+  $files = Get-ChildItem -Path $cacheDir -Recurse -File -Force -ErrorAction SilentlyContinue
+  $deletedCount = 0
+  $skippedCount = 0
+  $freedBytes = 0
+  foreach ($f in $files) {
+    try {
+      $size = $f.Length
+      Remove-Item -LiteralPath $f.FullName -Force -ErrorAction Stop
+      $deletedCount++
+      $freedBytes += $size
+    } catch {
+      $skippedCount++
+    }
+  }
+  [PSCustomObject]@{ installed = $true; stoppedCount = $stoppedCount; deletedCount = $deletedCount; skippedCount = $skippedCount; freedBytes = $freedBytes; targetDir = $cacheDir } | ConvertTo-Json -Compress
+}
+`;
+
+async function runClearTeamsCache() {
+  const { err, stdout, stderr } = await execPowerShellCommand(TEAMS_CACHE_CLEAR_SCRIPT, 30000);
+  if (err) return { succeeded: false, detail: `Teams cache clear script failed to run: ${err.message} (stderr="${stderr.trim()}").` };
+  try {
+    const result = JSON.parse(stdout.trim());
+    if (!result.installed) {
+      return { succeeded: false, detail: `Teams is not installed on this device (checked ${result.targetDir}) - nothing to clear.` };
+    }
+    const freedMb = (result.freedBytes / (1024 * 1024)).toFixed(1);
+    return {
+      succeeded: true,
+      detail: `Stopped ${result.stoppedCount} Teams process(es), deleted ${result.deletedCount} cache file(s) from ${result.targetDir}, freed ${freedMb} MB. Skipped ${result.skippedCount} locked/in-use file(s).`,
+    };
+  } catch {
+    return { succeeded: false, detail: `Teams cache clear script produced unparseable output: "${stdout.trim()}".` };
+  }
+}
+
 const REMEDIATION_ACTIONS = {
   "flush-dns": { label: "Flush DNS Cache", run: runFlushDns },
   "clean-temp": { label: "Clean Temp Files", run: runCleanTemp },
   "restart-service": { label: "Restart Print Spooler Service", run: runRestartService },
+  "clear-teams-cache": { label: "Clear Teams Cache", run: runClearTeamsCache },
 };
 
 // Real, immutable audit trail - reuses the events table (backend/schema.sql) already built for
