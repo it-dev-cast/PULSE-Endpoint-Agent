@@ -2288,7 +2288,19 @@ async function runBackendCycle() {
 
 async function backendPollLoop() {
   for (;;) {
-    await runBackendCycle();
+    try {
+      await runBackendCycle();
+    } catch (err) {
+      // Without this, a single uncaught rejection anywhere inside runBackendCycle silently and
+      // PERMANENTLY kills this loop - nothing else in the process depends on it, so the process
+      // itself stays alive (no crash Task Scheduler's own RestartCount/RestartInterval safety
+      // net could ever react to). Real, confirmed live during this project's own remote-dispatch
+      // testing: an instance sat with a "Running" status for 8+ minutes with zero outbound
+      // backend network activity and near-zero CPU time, indistinguishable from healthy without
+      // directly inspecting the process - exactly the failure mode this catch prevents. One
+      // failed cycle is now logged and skipped, same as a missed heartbeat for any other reason.
+      console.error("[telemetry] backendPollLoop: runBackendCycle failed, will retry next cycle:", err);
+    }
     await new Promise((resolve) => setTimeout(resolve, BACKEND_POLL_INTERVAL_MS));
   }
 }
