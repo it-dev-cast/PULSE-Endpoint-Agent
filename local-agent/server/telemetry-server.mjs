@@ -1871,6 +1871,15 @@ function extractLiveStatusFields(data) {
   putDetail(detail, "secureBootEnabled", sec.secureBootEnabled);
   putDetail(detail, "bitlockerOn", sec.bitlockerOn);
   putDetail(detail, "securityHealthPct", sec.securityHealthPct);
+  // Real Windows Update check (runWindowsUpdateCheck, hourly WUA search) - already computed for
+  // the local Tauri UI's own cache, just not previously included in what reaches the Cloud
+  // Command Center. pendingCount alone (not the derived upToDate boolean - the dashboard can
+  // derive that itself, pendingCount === 0, the same "don't send a derived value alongside its
+  // own source" convention every other field here already follows) plus checkedAt so a device
+  // that hasn't completed its first hourly check yet reads as "not checked yet," not a false "0
+  // pending."
+  putDetail(detail, "windowsUpdatePendingCount", numOrNull(data?.windowsUpdate?.pendingCount));
+  putDetail(detail, "windowsUpdateCheckedAt", strOrNull(data?.windowsUpdate?.checkedAt));
 
   return { cpuPct, ramPct, diskPct, batteryPct, detail: Object.keys(detail).length > 0 ? detail : undefined };
 }
