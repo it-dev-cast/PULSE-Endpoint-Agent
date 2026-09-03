@@ -18,6 +18,8 @@ release-signing-key.json
 *.pem
 .device-credentials.json
 .metric-snapshot-state.json
+.self-update-state.json
+.entitlement-cache.json
 
 # Local databases and compiled binaries
 *.db
