@@ -5464,7 +5464,12 @@ function AAlertFeedRow({
   onSelect: (id: string) => void;
   onAcknowledge: (id: string) => void;
 }) {
-  const meta = SEVERITY_META[alert.severity];
+  // Fallback for a persisted alert whose severity is outside SEVERITY_META's real vocabulary
+  // (critical/warning/info) - same defensive pattern as hydrateAlert's ICON_MAP[iconKey] ?? Cpu
+  // in useAlertEngine.ts, guarding the exact real crash this was confirmed to cause ("Cannot
+  // read properties of undefined") when an out-of-vocabulary value reached this indexing
+  // unguarded.
+  const meta = SEVERITY_META[alert.severity] ?? SEVERITY_META.info;
   return (
     <div
       role="button"
@@ -5622,7 +5627,12 @@ function AAlertDetailCard({
     );
   }
 
-  const meta = SEVERITY_META[alert.severity];
+  // Fallback for a persisted alert whose severity is outside SEVERITY_META's real vocabulary
+  // (critical/warning/info) - same defensive pattern as hydrateAlert's ICON_MAP[iconKey] ?? Cpu
+  // in useAlertEngine.ts, guarding the exact real crash this was confirmed to cause ("Cannot
+  // read properties of undefined") when an out-of-vocabulary value reached this indexing
+  // unguarded.
+  const meta = SEVERITY_META[alert.severity] ?? SEVERITY_META.info;
   const ruleSnoozeUntil = alert.ruleId ? snoozedUntil[alert.ruleId] : undefined;
   const isRuleSnoozed = ruleSnoozeUntil != null && ruleSnoozeUntil > Date.now();
 
