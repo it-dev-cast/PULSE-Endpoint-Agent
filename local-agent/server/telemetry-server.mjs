@@ -2685,6 +2685,53 @@ async function getAllScheduledTaskStates() {
   return states;
 }
 
+// Real safety net, independent of execFile's/fetch's own internal timeout on each call below -
+// those only guarantee the immediate child process (or HTTP request) gets killed/aborted. Caught
+// live, twice, at two separate call sites in this same cycle: a child-process-adjacent call hangs
+// indefinitely under this process's elevated, hidden-console context, well past its own internal
+// timeout, with the callback that timeout depends on never firing - silently blocking the entire
+// 60s backend cycle forever (last_seen_at frozen, no exception anywhere). First caught live via
+// temporary instrumentation at the Windows Update/BIOS check (a COM surrogate process plausibly
+// inheriting the same stdio handles, outliving the killed powershell.exe); a second, separate live
+// hang then occurred before entitlement/heartbeat ever resolved once, most likely inside
+// getAllScheduledTaskStates' own six concurrent schtasks.exe spawns. Two real, confirmed hangs at
+// different call sites is evidence of a systemic class of failure, not one isolated bug - so this
+// same net now covers every child-process-adjacent call in the cycle (getAllScheduledTaskStates,
+// signFingerprint, postHardwareCheck), not just the one caught first. Deliberately NOT applied to
+// fetchEntitlement/sendHeartbeat/fetchDbHealth - plain fetch() calls with no child process
+// involved, and none has ever hung in any test today; wrapping them anyway would be speculative
+// defensive coding, not evidence-based.
+//
+// This race doesn't care why the underlying promise never resolves - a timed-out check is logged
+// clearly and treated as a real failure (null) this cycle, same as any other missed signal, never
+// silently retried mid-flight. The underlying child process, if genuinely still alive, is left
+// running rather than adding process-tree-killing complexity for a corner this rare.
+function withTimeout(promise, timeoutMs, label) {
+  let timeoutId;
+  const timeout = new Promise((resolve) => {
+    timeoutId = setTimeout(() => {
+      console.error(`[telemetry] ${label} did not complete within ${timeoutMs}ms - treating as failed this cycle, not blocking the rest of runBackendCycle.`);
+      resolve(null);
+    }, timeoutMs);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timeoutId));
+}
+
+// Each margin is the same shape: comfortably past whatever internal timeout that specific call
+// already has, so the normal path always gets every chance to resolve on its own first - these
+// only fire if that call's own internal timeout mechanism is itself what's stuck.
+// +10s past execPowerShellCommand's own 120s internal timeout on both WUA calls.
+const WINDOWS_UPDATE_CHECK_TIMEOUT_MS = 130000;
+// +5s past execSchtasksQuery's own 5s per-task timeout - all six run concurrently inside
+// getAllScheduledTaskStates, so the aggregate ceiling is one 5s timeout, not six stacked.
+const SCHEDULED_TASK_STATES_TIMEOUT_MS = 10000;
+// +10s past execRustSignFingerprint's own RUST_SIGN_TIMEOUT_MS (15s).
+const SIGN_FINGERPRINT_TIMEOUT_MS = 25000;
+// +10s past postHardwareCheck's own BACKEND_REQUEST_TIMEOUT_MS (15s) - a plain fetch(), not a
+// child-process spawn, but included per this class of hang being confirmed real in this exact
+// hardware-check block (signFingerprint immediately precedes it every cycle it runs).
+const POST_HARDWARE_CHECK_TIMEOUT_MS = 25000;
+
 // Runs on BACKEND_POLL_INTERVAL_MS, not every 5s poll cycle - enrolls the device if it isn't
 // already, then fetches the real entitlement and sends a heartbeat. entitlementState is only
 // ever set here (collect() just reads whatever this last left it as); a failure at any step
@@ -2696,7 +2743,7 @@ async function getAllScheduledTaskStates() {
 // enrolled, so there's no reason to skip them just because enrollment hasn't happened yet.
 async function runBackendCycle() {
   const dbHealthPromise = fetchDbHealth();
-  const scheduledTasksPromise = getAllScheduledTaskStates();
+  const scheduledTasksPromise = withTimeout(getAllScheduledTaskStates(), SCHEDULED_TASK_STATES_TIMEOUT_MS, "getAllScheduledTaskStates");
 
   if (!deviceCredentials) {
     deviceCredentials = await loadOrRegisterDevice();
@@ -2785,8 +2832,12 @@ async function runBackendCycle() {
     if (fingerprint) {
       lastHardwareCheckAt = Date.now();
       const fingerprintJson = JSON.stringify(fingerprint);
-      const identity = await signFingerprint(fingerprintJson);
-      const result = await postHardwareCheck(deviceCredentials, fingerprint, fingerprintJson, identity);
+      const identity = await withTimeout(signFingerprint(fingerprintJson), SIGN_FINGERPRINT_TIMEOUT_MS, "signFingerprint");
+      const result = await withTimeout(
+        postHardwareCheck(deviceCredentials, fingerprint, fingerprintJson, identity),
+        POST_HARDWARE_CHECK_TIMEOUT_MS,
+        "postHardwareCheck",
+      );
       if (result) {
         hardwareIntegrityState = result;
         console.log(
@@ -2858,7 +2909,10 @@ async function runBackendCycle() {
   // searches on the exact same cadence - no reason to serialize them one after the other.
   if (Date.now() - lastWindowsUpdateCheckAt >= WINDOWS_UPDATE_CHECK_INTERVAL_MS) {
     lastWindowsUpdateCheckAt = Date.now();
-    const [softwareResult, biosResult] = await Promise.all([runWindowsUpdateCheck(), runBiosFirmwareUpdateCheck()]);
+    const [softwareResult, biosResult] = await Promise.all([
+      withTimeout(runWindowsUpdateCheck(), WINDOWS_UPDATE_CHECK_TIMEOUT_MS, "Windows Update check"),
+      withTimeout(runBiosFirmwareUpdateCheck(), WINDOWS_UPDATE_CHECK_TIMEOUT_MS, "BIOS firmware update check"),
+    ]);
     if (softwareResult) {
       windowsUpdateState = softwareResult;
       console.log(`[telemetry] Windows Update check: ${softwareResult.upToDate ? "up to date" : `${softwareResult.pendingCount} pending update(s)`}`);
