@@ -699,6 +699,11 @@ func handleHardwareCheck(db *DB, hub *liveHub) http.HandlerFunc {
 				writeError(w, http.StatusInternalServerError, "failed to store baseline")
 				return
 			}
+			// Real, additive duplicate-enrollment check (see duplicate_fingerprint.go's own
+			// top comment) - this is the earliest point a real fingerprint exists for this
+			// device AND the caller is already authenticated, so this can't run any earlier.
+			// Never changes this response either way.
+			checkForDuplicateFingerprint(db, hub, device, current, now)
 			writeJSON(w, http.StatusOK, hardwareCheckResponse{Status: "baseline-set"})
 			return
 		}
