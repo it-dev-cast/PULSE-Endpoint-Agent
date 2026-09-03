@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Battery, Cpu, HardDrive, MemoryStick, Shield, ShieldAlert, Thermometer, type LucideIcon } from "lucide-react";
-import type { AlertItem } from "../data/alerts";
+import { SEVERITY_META, type AlertItem } from "../data/alerts";
 import { isBatteryDischarging } from "../data/batteryStatus";
 import { useTelemetry, type TelemetrySnapshot } from "./useTelemetry";
 import { getBatteryHealthPercent } from "../lib/derived";
@@ -191,9 +191,34 @@ const ICON_KEY_BY_ICON = new Map<LucideIcon, IconKey>(
 // by its string key.
 type PersistedAlert = Omit<AlertItem, "Icon"> & { iconKey: IconKey };
 
+// General field-sanitization pass for whatever a real installation's localStorage has
+// accumulated across past, possibly incompatible versions of this file (see the ruleId-dedup
+// and unwired-warranty migrations above, both written for exactly that reason) - iconKey was
+// already the one field validated this way (ICON_MAP[iconKey] ?? Cpu); severity and category
+// get the same real treatment here, since both are read back as trusted, unvalidated strings
+// otherwise. A console.warn on coercion is deliberate, not an oversight to quiet later - this
+// is a real correctness gap in whatever's persisted, and should stay visible in the console
+// rather than silently normalizing away evidence of it.
 function hydrateAlert(persisted: PersistedAlert): AlertItem {
   const { iconKey, ...rest } = persisted;
-  return { ...rest, Icon: ICON_MAP[iconKey] ?? Cpu };
+
+  let severity = rest.severity;
+  if (!(severity in SEVERITY_META)) {
+    console.warn(
+      `[useAlertEngine] persisted alert ${rest.id} has out-of-vocabulary severity ${JSON.stringify(severity)} - coercing to "info"`,
+    );
+    severity = "info";
+  }
+
+  let category = rest.category;
+  if (!(category in DEFAULT_CATEGORY_PREFS)) {
+    console.warn(
+      `[useAlertEngine] persisted alert ${rest.id} has out-of-vocabulary category ${JSON.stringify(category)} - coercing to "Performance"`,
+    );
+    category = "Performance";
+  }
+
+  return { ...rest, severity, category, Icon: ICON_MAP[iconKey] ?? Cpu };
 }
 
 function dehydrateAlert(alert: AlertItem): PersistedAlert {
