@@ -476,7 +476,8 @@ end;
 // liveness/executability check, not a re-implementation of what the binary itself already does.
 function SmokeTestRustCollector(): Boolean;
 var
-  ExePath, OutPath, Output, Cmd: String;
+  ExePath, OutPath, Cmd: String;
+  Output: AnsiString;
   ResultCode: Integer;
   Attempt: Integer;
 begin
