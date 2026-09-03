@@ -119,16 +119,24 @@ func checkForDuplicateFingerprint(db *DB, hub *liveHub, device *Device, current 
 // the same "latest of last_seen_at and device_live_status.updated_at" contact-recency rule
 // offline_detection.go's own periodic sweep uses (live telemetry every ~5s is as much "reporting"
 // as heartbeat every ~60s) - reuses that file's own laterTime/parseRFC3339 rather than a second,
-// possibly-diverging copy of the same real rule. A device that has never reported at all (both
-// null) counts as stale.
+// possibly-diverging copy of the same real rule.
+//
+// enrolled_at (always non-null) is included as a third, floor reference point - found live, not
+// guessed: a real test device whose hardware-check ran (as it commonly does, real timing)
+// before its first-ever heartbeat had a still-null last_seen_at seconds after registering, and
+// the original null-means-stale fallback here read that as "abandoned for 30+ minutes" instead
+// of "hasn't had time to report yet," incorrectly auto-revoking a device that had only existed
+// for a few seconds. Falling back to enrolled_at instead means "how long since ANY contact,
+// enrollment included," not "no positive signal yet, therefore assume the worst."
 func isDeviceStale(db *DB, deviceID string, threshold time.Duration, now time.Time) (bool, error) {
+	var enrolledAt string
 	var lastSeenAt, liveUpdatedAt sql.NullString
 	err := db.QueryRow(
-		`SELECT d.last_seen_at, ls.updated_at FROM devices d
+		`SELECT d.enrolled_at, d.last_seen_at, ls.updated_at FROM devices d
 		 LEFT JOIN device_live_status ls ON ls.device_id = d.id
 		 WHERE d.id = ?`,
 		deviceID,
-	).Scan(&lastSeenAt, &liveUpdatedAt)
+	).Scan(&enrolledAt, &lastSeenAt, &liveUpdatedAt)
 	if err != nil {
 		return false, err
 	}
@@ -140,7 +148,12 @@ func isDeviceStale(db *DB, deviceID string, threshold time.Duration, now time.Ti
 		liveUpdatedPtr = &liveUpdatedAt.String
 	}
 	latest := laterTime(lastSeenPtr, liveUpdatedPtr)
+	if enrolledTime := parseRFC3339(&enrolledAt); enrolledTime != nil && (latest == nil || enrolledTime.After(*latest)) {
+		latest = enrolledTime
+	}
 	if latest == nil {
+		// enrolled_at itself unparseable - genuinely can't tell how long it's been, so this
+		// stays the one case treated as stale defensively rather than silently never-stale.
 		return true, nil
 	}
 	return now.Sub(*latest) > threshold, nil
