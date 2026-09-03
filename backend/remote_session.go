@@ -18,6 +18,15 @@ import (
 // both sides leave, so there's no reason to keep it (or its memory) around indefinitely.
 const remoteSessionIdleTimeout = 30 * time.Minute
 
+// sessionRemovalGracePeriod is how long a session with zero connected peers is kept alive
+// before actually being removed - found live, not guessed, via a real customer whose single
+// signaling socket dropped (network blip, not a real disconnect) while waiting for an
+// operator: the old immediate-removal behavior deleted the session the instant that happened,
+// so a reconnect (or, moments later, the operator's own Join click) got a real 404 for a
+// session that was never actually over. 25s covers ScreenSharePOC.tsx's own reconnect backoff
+// (1s/2s/4s/8s/16s, same doubling as sse.js) for several attempts before genuinely giving up.
+const sessionRemovalGracePeriod = 25 * time.Second
+
 // remoteSession is a real, ephemeral WebRTC signaling relay - deliberately in-memory, not
 // persisted to SQLite. Unlike tenants/devices/entitlements, this isn't durable business data:
 // once both peers disconnect, there is nothing left worth keeping.
@@ -36,6 +45,12 @@ type remoteSession struct {
 	mu           sync.Mutex
 	lastActivity time.Time
 	peers        map[*websocket.Conn]bool
+
+	// Non-nil while a removal is pending (peers just dropped to zero) - see
+	// sessionRemovalGracePeriod's own comment. Stopped and cleared the instant any peer
+	// (re)connects, whether that's a genuine reconnect or just a fresh join; either way the
+	// session is no longer empty, so there's nothing left for the pending removal to do.
+	removalTimer *time.Timer
 
 	// lastMessage/lastMessageType hold the most recent relayed message as an opaque byte blob -
 	// found live, not guessed, via a real two-tab test: the Share side sends its offer the
@@ -333,6 +348,14 @@ func handleRemoteSessionWS(store *remoteSessionStore) http.HandlerFunc {
 		sess.peers[conn] = true
 		sess.lastActivity = time.Now()
 		peerCount := len(sess.peers)
+		// A peer just (re)connected - cancel any pending removal from a previous peer count
+		// dropping to zero (see sessionRemovalGracePeriod's own comment). Applies identically
+		// whether this is a genuine reconnect or just a fresh join; either way the session is
+		// no longer empty.
+		if sess.removalTimer != nil {
+			sess.removalTimer.Stop()
+			sess.removalTimer = nil
+		}
 		var replay []byte
 		var replayType int
 		if sess.lastMessage != nil {
@@ -357,8 +380,23 @@ func handleRemoteSessionWS(store *remoteSessionStore) http.HandlerFunc {
 			sess.mu.Unlock()
 			log.Printf("remote-sessions: peer left session %s (now %d peer(s) left)", id, remaining)
 			if remaining == 0 {
-				store.remove(id)
-				log.Printf("remote-sessions: session %s has no peers left - removed", id)
+				// Grace period, not immediate removal - see sessionRemovalGracePeriod's own
+				// comment. Re-checks peers are STILL empty when the timer fires (a peer may
+				// have reconnected in the meantime, which already stopped this exact timer -
+				// see the connect path above - but a fresh AfterFunc scheduled here always
+				// starts from a clean slate regardless).
+				sess.mu.Lock()
+				sess.removalTimer = time.AfterFunc(sessionRemovalGracePeriod, func() {
+					sess.mu.Lock()
+					stillEmpty := len(sess.peers) == 0
+					sess.mu.Unlock()
+					if stillEmpty {
+						store.remove(id)
+						log.Printf("remote-sessions: session %s still had no peers after the %s grace period - removed", id, sessionRemovalGracePeriod)
+					}
+				})
+				sess.mu.Unlock()
+				log.Printf("remote-sessions: session %s has no peers left - removing in %s unless a peer reconnects", id, sessionRemovalGracePeriod)
 			}
 		}()
 
@@ -381,5 +419,23 @@ func handleRemoteSessionWS(store *remoteSessionStore) http.HandlerFunc {
 			}
 			sess.mu.Unlock()
 		}
+	}
+}
+
+// handleRemoteSessionExists is the small, real signal a client needs to tell "this session is
+// genuinely gone" apart from "can't reach the backend at all" - a raw WebSocket's onerror/
+// onclose expose no HTTP status on a failed handshake (a real browser API limitation, not an
+// oversight here), so ScreenSharePOC.tsx and RemoteSessionViewer.jsx both call this plain HTTP
+// route instead to decide that. No auth, same as the WS route itself - the session ID is
+// already the real access control, and this reveals nothing beyond "does this ID exist right
+// now," the same fact a WS connection attempt would have revealed anyway.
+func handleRemoteSessionExists(store *remoteSessionStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := chi.URLParam(r, "id")
+		if _, ok := store.get(id); !ok {
+			writeJSON(w, http.StatusNotFound, map[string]any{"exists": false})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"exists": true})
 	}
 }

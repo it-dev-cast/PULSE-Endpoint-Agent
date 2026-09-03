@@ -237,6 +237,7 @@ func main() {
 		// No auth - the session ID itself is the access control (see handleRemoteSessionWS's
 		// own comment). The customer side of a real support session isn't logged into anything.
 		r.Get("/remote-sessions/{id}/ws", handleRemoteSessionWS(remoteSessions))
+		r.Get("/remote-sessions/{id}", handleRemoteSessionExists(remoteSessions))
 	})
 
 	log.Printf("command-center listening on :%s", port)
