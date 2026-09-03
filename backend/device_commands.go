@@ -13,7 +13,7 @@ import (
 
 // PRD §9 Self-Healing - real v1 remote dispatch. See schema.sql's own comment on device_commands
 // for how this relates to the immutable events log (this table is current dispatch status, not a
-// second audit trail) and telemetry-server.mjs's own PRD §9 comment for the 4 real remediation
+// second audit trail) and telemetry-server.mjs's own PRD §9 comment for the 6 real remediation
 // actions this dispatches to, unchanged.
 
 // knownRemediationActions mirrors telemetry-server.mjs's REMEDIATION_ACTIONS keys exactly - the
@@ -21,10 +21,12 @@ import (
 // unlike approval_requests' Action, which is intentionally free-form since that table gates
 // whatever the device itself decides to ask permission for, not a backend-dispatched action).
 var knownRemediationActions = map[string]bool{
-	"flush-dns":         true,
-	"clean-temp":        true,
-	"restart-service":   true,
-	"clear-teams-cache": true,
+	"flush-dns":                true,
+	"clean-temp":               true,
+	"restart-service":          true,
+	"clear-teams-cache":        true,
+	"repair-vpn":               true,
+	"collect-bsod-diagnostics": true,
 }
 
 type DeviceCommand struct {
@@ -131,7 +133,7 @@ func handleEnqueueCommand(db *DB, hub *liveHub) http.HandlerFunc {
 
 		var req enqueueCommandRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || !knownRemediationActions[req.Action] {
-			writeError(w, http.StatusBadRequest, "action must be one of: flush-dns, clean-temp, restart-service, clear-teams-cache")
+			writeError(w, http.StatusBadRequest, "action must be one of: flush-dns, clean-temp, restart-service, clear-teams-cache, repair-vpn, collect-bsod-diagnostics")
 			return
 		}
 

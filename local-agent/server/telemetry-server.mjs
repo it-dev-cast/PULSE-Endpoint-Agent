@@ -1146,16 +1146,22 @@ async function handleEventsListProxy(req, res) {
 }
 
 // ─── PRD §9 Self-Healing & Automation - real v1 ────────────
-// Real policy gate + 4 real, safe remediation actions, gated on the tenant's actual
+// Real policy gate + 6 real, safe remediation actions, gated on the tenant's actual
 // plan_features.Self-Healing row (backend/schema.sql) - currently false for this tenant's
 // ProSupport plan (see that schema's own reasoning comment). Clear Teams cache confirmed real
 // via direct investigation (new Teams/MSIX genuinely installed and running on this machine, real
 // LocalCache path verified on disk) - runClearTeamsCache below still treats a device where Teams
 // isn't installed as a real, reported failure, not an assumption every fleet device has it.
-// Deliberately still NOT built: Repair VPN (no VPN configured anywhere in this fleet to build or
-// test against), OS diagnostic/BSOD trigger (Windows Error Reporting is real and active here, but
-// has never recorded an actual crash/bugcheck on this device - nothing real to detect yet),
-// Certificate renewal (no PKI/SCEP infrastructure exists anywhere in this project) - these stay
+//
+// Repair VPN (runRepairVpn) and Collect BSOD Diagnostics (runCollectBsodDiagnostics) are both
+// built too now, but with a real, disclosed gap each - see their own comments below for why: no
+// VPN exists anywhere in this fleet to verify the repair actually fixes anything, and no real
+// crash/bugcheck has ever been recorded on this device to verify the detection actually finds
+// something when one exists. Built as honest best-effort mechanisms using only built-in Windows
+// APIs, not verified fixes/detections - the gap is disclosed in code, not hidden.
+//
+// Certificate renewal is the one action still deliberately NOT built: no PKI/SCEP infrastructure
+// exists anywhere in this project, so there is genuinely no cert to renew against - this stays
 // honestly unbuilt rather than faked.
 
 // A fresh check on every remediation request, not a read of entitlementState (which only
@@ -1518,11 +1524,142 @@ async function runClearTeamsCache() {
   }
 }
 
+// Generic Windows VPN repair using only built-in APIs - no VPN-product-specific logic, since no
+// VPN of any kind (built-in or 3rd-party) exists anywhere in this fleet to target one against
+// (confirmed via direct investigation: no Get-VpnConnection entries, no rasphone.pbk, no known
+// 3rd-party VPN client installed or running). Three real, standard Windows troubleshooting steps,
+// each tolerant of the others failing: restart RasMan (the service that owns every VPN/dial-up
+// connection), reset each WAN Miniport virtual adapter (a real, reversible PnP disable/enable
+// cycle - doesn't touch stored connection profiles, just forces Windows to reinitialize the
+// adapter), and re-register the two RAS client DLLs real Windows VPN troubleshooting guides most
+// consistently cite (rasapi32.dll, rasman.dll).
+//
+// THIS HAS NEVER BEEN TESTED AGAINST A REAL BROKEN OR WORKING VPN CONNECTION, because none exists
+// in this fleet to test against - ships as a best-effort mechanism built from real, standard
+// Windows repair steps, not a verified fix. succeeded reflects only the one directly-checkable
+// real signal available (did RasMan end up Running) - the miniport/DLL steps are real and
+// attempted, but there is no real "did this fix a VPN" signal to check them against, so their
+// counts are reported in detail only, not folded into pass/fail.
+const VPN_REPAIR_SCRIPT = `
+$rasmanStatus = "Unknown"
+try {
+  Restart-Service -Name RasMan -Force -ErrorAction Stop
+  Start-Sleep -Milliseconds 500
+  $rasmanStatus = (Get-Service -Name RasMan).Status.ToString()
+} catch {
+  $rasmanStatus = "RestartFailed"
+}
+
+$miniports = Get-PnpDevice -Class Net -ErrorAction SilentlyContinue | Where-Object { $_.FriendlyName -like "WAN Miniport*" }
+$miniportTotal = ($miniports | Measure-Object).Count
+$miniportReset = 0
+foreach ($m in $miniports) {
+  try {
+    Disable-PnpDevice -InstanceId $m.InstanceId -Confirm:$false -ErrorAction Stop
+    Start-Sleep -Milliseconds 300
+    Enable-PnpDevice -InstanceId $m.InstanceId -Confirm:$false -ErrorAction Stop
+    $miniportReset++
+  } catch {
+  }
+}
+
+$dllNames = @("rasapi32.dll", "rasman.dll")
+$dllResults = @()
+foreach ($dll in $dllNames) {
+  $proc = Start-Process -FilePath "regsvr32.exe" -ArgumentList "/s", $dll -PassThru -Wait -WindowStyle Hidden
+  $dllResults += [PSCustomObject]@{ name = $dll; exitCode = $proc.ExitCode }
+}
+
+[PSCustomObject]@{ rasmanStatus = $rasmanStatus; miniportTotal = $miniportTotal; miniportReset = $miniportReset; dllResults = $dllResults } | ConvertTo-Json -Compress -Depth 4
+`;
+
+async function runRepairVpn() {
+  const { err, stdout, stderr } = await execPowerShellCommand(VPN_REPAIR_SCRIPT, 30000);
+  if (err) return { succeeded: false, detail: `VPN repair script failed to run: ${err.message} (stderr="${stderr.trim()}").` };
+  try {
+    const result = JSON.parse(stdout.trim());
+    const dllOkCount = result.dllResults.filter((d) => d.exitCode === 0).length;
+    const succeeded = result.rasmanStatus === "Running";
+    return {
+      succeeded,
+      detail: `RasMan service: ${result.rasmanStatus}. WAN Miniport adapters reset: ${result.miniportReset}/${result.miniportTotal}. RAS DLLs re-registered: ${dllOkCount}/${result.dllResults.length}. Best-effort repair - never verified against a real VPN connection (none exists in this fleet).`,
+    };
+  } catch {
+    return { succeeded: false, detail: `VPN repair script produced unparseable output: "${stdout.trim()}".` };
+  }
+}
+
+// Detection only, deliberately - collects whatever real crash evidence already exists on this
+// device rather than triggering anything. Checks the same real, in-box mechanisms confirmed via
+// direct investigation: WER's LocalDumps registry config, %LOCALAPPDATA%\CrashDumps,
+// C:\Windows\Minidump, C:\Windows\MEMORY.DMP, and the real Microsoft-Windows-WER-SystemErrorReporting
+// event provider Windows itself uses specifically for kernel bugchecks (distinct from the general
+// Windows Error Reporting provider every ordinary application crash also uses - checked separately
+// so an unrelated app-crash report, e.g. this exact device's own real Windows Update Store Agent
+// failures, is never mistaken for a BSOD).
+//
+// THIS HAS NEVER FIRED AGAINST A REAL CRASH ON THIS FLEET - confirmed directly that this device
+// has no minidump, no CrashDumps file, no MEMORY.DMP, and no BugCheck event; the closest real
+// signal found was one Kernel-Power dirty-shutdown event (Event ID 41) with no accompanying
+// bugcheck record, which isn't itself confirmed evidence of a BSOD. succeeded reflects only
+// whether the check itself ran, not whether a crash was found - "no crash record found" is a real,
+// honest, and (on this device today) accurate result, not a failure.
+const BSOD_DIAGNOSTIC_SCRIPT = `
+$minidumpDir = "C:\\Windows\\Minidump"
+$crashDumpsDir = "$env:LOCALAPPDATA\\CrashDumps"
+$localDumpsKey = "HKLM:\\SOFTWARE\\Microsoft\\Windows\\Windows Error Reporting\\LocalDumps"
+
+$minidumpFiles = if (Test-Path $minidumpDir) { Get-ChildItem -Path $minidumpDir -Filter "*.dmp" -File -ErrorAction SilentlyContinue } else { @() }
+$crashDumpFiles = if (Test-Path $crashDumpsDir) { Get-ChildItem -Path $crashDumpsDir -File -ErrorAction SilentlyContinue } else { @() }
+$localDumpsConfigured = Test-Path $localDumpsKey
+$memoryDmpExists = Test-Path "C:\\Windows\\MEMORY.DMP"
+
+$bugcheckEvent = Get-WinEvent -FilterHashtable @{LogName='System'; ProviderName='Microsoft-Windows-WER-SystemErrorReporting'} -MaxEvents 1 -ErrorAction SilentlyContinue
+
+$allDumps = @($minidumpFiles) + @($crashDumpFiles)
+$mostRecent = $allDumps | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+
+[PSCustomObject]@{
+  minidumpCount = ($minidumpFiles | Measure-Object).Count
+  crashDumpCount = ($crashDumpFiles | Measure-Object).Count
+  memoryDmpExists = $memoryDmpExists
+  localDumpsConfigured = $localDumpsConfigured
+  mostRecentDumpPath = if ($mostRecent) { $mostRecent.FullName } else { $null }
+  mostRecentDumpAt = if ($mostRecent) { $mostRecent.LastWriteTimeUtc.ToString("o") } else { $null }
+  bugcheckEventFound = $null -ne $bugcheckEvent
+  bugcheckEventAt = if ($bugcheckEvent) { $bugcheckEvent.TimeCreated.ToUniversalTime().ToString("o") } else { $null }
+} | ConvertTo-Json -Compress
+`;
+
+async function runCollectBsodDiagnostics() {
+  const { err, stdout, stderr } = await execPowerShellCommand(BSOD_DIAGNOSTIC_SCRIPT, 15000);
+  if (err) return { succeeded: false, detail: `BSOD diagnostic check failed to run: ${err.message} (stderr="${stderr.trim()}").` };
+  try {
+    const result = JSON.parse(stdout.trim());
+    const hasRecord = result.mostRecentDumpPath != null || result.bugcheckEventFound || result.memoryDmpExists;
+    if (!hasRecord) {
+      return {
+        succeeded: true,
+        detail: `No crash record found - no minidump/CrashDumps file, no MEMORY.DMP, and no BugCheck event on this device (LocalDumps ${result.localDumpsConfigured ? "is" : "is not"} configured).`,
+      };
+    }
+    const parts = [];
+    if (result.mostRecentDumpPath) parts.push(`most recent dump file: ${result.mostRecentDumpPath} (${result.mostRecentDumpAt})`);
+    if (result.memoryDmpExists) parts.push(`C:\\Windows\\MEMORY.DMP exists`);
+    if (result.bugcheckEventFound) parts.push(`most recent BugCheck event: ${result.bugcheckEventAt}`);
+    return { succeeded: true, detail: `Crash record found - ${parts.join("; ")}.` };
+  } catch {
+    return { succeeded: false, detail: `BSOD diagnostic check produced unparseable output: "${stdout.trim()}".` };
+  }
+}
+
 const REMEDIATION_ACTIONS = {
   "flush-dns": { label: "Flush DNS Cache", run: runFlushDns },
   "clean-temp": { label: "Clean Temp Files", run: runCleanTemp },
   "restart-service": { label: "Restart Print Spooler Service", run: runRestartService },
   "clear-teams-cache": { label: "Clear Teams Cache", run: runClearTeamsCache },
+  "repair-vpn": { label: "Repair VPN Connection", run: runRepairVpn },
+  "collect-bsod-diagnostics": { label: "Collect BSOD Diagnostics", run: runCollectBsodDiagnostics },
 };
 
 // Real, immutable audit trail - reuses the events table (backend/schema.sql) already built for

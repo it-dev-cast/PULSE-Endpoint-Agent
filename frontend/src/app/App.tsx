@@ -6260,16 +6260,26 @@ const SS_SECTIONS = [
 // Healing row - see backend/schema.sql for why it's currently false for ProSupport), executed
 // by local-agent (the only process with real OS access) and logged to the same real events
 // table AI Intel's Timeline already reads. Clear Teams cache confirmed real via direct
-// investigation (new Teams/MSIX genuinely installed here). Deliberately still not built: Repair
-// VPN/OS diagnostic trigger/Certificate renewal - see telemetry-server.mjs's own comment for why
-// each stays honestly unbuilt rather than faked.
-type RemediationActionId = "flush-dns" | "clean-temp" | "restart-service" | "clear-teams-cache";
+// investigation (new Teams/MSIX genuinely installed here). Repair VPN and Collect BSOD
+// Diagnostics are both built too, each with a real, disclosed gap (see their own descriptions
+// below and telemetry-server.mjs's own comment) - best-effort mechanisms using only built-in
+// Windows APIs, not verified fixes/detections. Certificate renewal is the one action still
+// deliberately not built: no PKI/SCEP infrastructure exists anywhere in this project.
+type RemediationActionId =
+  | "flush-dns"
+  | "clean-temp"
+  | "restart-service"
+  | "clear-teams-cache"
+  | "repair-vpn"
+  | "collect-bsod-diagnostics";
 
 const REMEDIATION_ACTIONS_UI: { id: RemediationActionId; label: string; description: string }[] = [
   { id: "flush-dns", label: "Flush DNS Cache", description: "Real ipconfig /flushdns on this device." },
   { id: "clean-temp", label: "Clean Temp Files", description: "Real deletion of files directly in this device's %TEMP% folder (not subdirectories) - locked/in-use files are skipped, not an error." },
   { id: "restart-service", label: "Restart Print Spooler Service", description: "Real restart of this device's Windows Print Spooler service - chosen because it's safe and unrelated to this project's own processes." },
   { id: "clear-teams-cache", label: "Clear Teams Cache", description: "Real stop of running Teams processes, then deletion of this device's Teams (new Teams/MSIX) LocalCache files - reports \"not installed\" honestly if this device doesn't have Teams." },
+  { id: "repair-vpn", label: "Repair VPN Connection", description: "Restarts RasMan, resets WAN Miniport adapters, re-registers RAS client DLLs - real Windows repair steps, but never tested against a real VPN connection (none exists in this fleet). Best-effort, not a verified fix." },
+  { id: "collect-bsod-diagnostics", label: "Collect BSOD Diagnostics", description: "Real, detection-only check of WER/LocalDumps/Minidump/MEMORY.DMP and the BugCheck event log for the most recent real crash record, if one exists. Never fired against a real crash on this fleet - \"no crash record found\" is this device's real, current result." },
 ];
 
 type RemediationRunState = { running: boolean; result: string | null; succeeded: boolean | null };
@@ -6282,6 +6292,8 @@ function SSAutomationSection() {
     "clean-temp": REMEDIATION_IDLE_STATE,
     "restart-service": REMEDIATION_IDLE_STATE,
     "clear-teams-cache": REMEDIATION_IDLE_STATE,
+    "repair-vpn": REMEDIATION_IDLE_STATE,
+    "collect-bsod-diagnostics": REMEDIATION_IDLE_STATE,
   });
   const { events } = useEventHistory(50);
 
