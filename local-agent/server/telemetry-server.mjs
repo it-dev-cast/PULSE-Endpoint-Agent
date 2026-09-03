@@ -1998,11 +1998,34 @@ async function handleHighImpactCheckProxy(req, res) {
 // "Update available" badge in the Tauri app (App.tsx's useAgentUpdate), which only ever shows a
 // human a manual download link. This is the actual PRD Section 31 mechanism: verify signature ->
 // verify sequence is newer -> verify SHA-256 of the downloaded installer -> invoke it silently ->
-// self-confirm on next successful heartbeat. Automatic health-based rollback is explicitly NOT
-// built here (see the investigation this was scoped from) - a device that never confirms is
-// exactly a device that goes silent, which existing offline-detection already surfaces; a human
-// re-running a retained past installer (see backend's resolveInstallerPathForVersion) is this
-// v1's real, honest recovery path, not an automated one.
+// confirm healthy or roll back automatically.
+//
+// Health contract: SELF_UPDATE_HEARTBEATS_REQUIRED consecutive successful heartbeats within
+// SELF_UPDATE_CONFIRM_WINDOW_MS of the update starting. One lucky heartbeat before a slow-onset
+// crash proves nothing; 3 genuinely does, at the existing ~60s heartbeat cadence. A process
+// restart during confirmation (see primeSelfUpdateConfirmation) resets the heartbeat count to
+// zero - a crash-loop mid-confirmation is itself evidence of instability, not a fresh chance -
+// but never extends the deadline; a crash-loop should make it expire sooner, never later. The
+// Scheduled Task's own real restart policy (RestartCount=15, RestartInterval=1min, confirmed via
+// Get-ScheduledTask) means a crash-looping process can keep auto-relaunching for ~15 minutes on
+// its own; 10 minutes lets most of that resolve naturally before rollback acts.
+//
+// Rollback: detected and acted on entirely by this device's own next cycle (processPendingSelfUpdate/
+// triggerSelfUpdateRollback below) - the backend is never told to make this decision, only ever
+// used as a dumb file host for the retained installer bytes (?version=, already real). Verifies
+// the re-downloaded previous version against previousManifest.sha256 - a hash this device already
+// proved genuine via signature at the moment it originally accepted that version, so no new
+// signature check or backend endpoint is needed (and none of the existing anti-replay logic
+// applies - this never goes through it). A device's very first self-update has no previousManifest
+// (its original install predates any signed verification) - rollback simply isn't available for
+// that one case, a disclosed limitation, not a gap: there's no real signed data to verify against.
+//
+// watchdog.ps1 independently mirrors this same rollback for the case this process crashes too
+// fast to ever run it itself (see that script's own comment) - both check the same pendingUpdate
+// and use a rollbackClaimed flag to avoid a double rollback race.
+
+const SELF_UPDATE_HEARTBEATS_REQUIRED = 3;
+const SELF_UPDATE_CONFIRM_WINDOW_MS = 10 * 60 * 1000;
 
 let selfUpdateInProgress = false; // in-memory guard - see checkAndApplySelfUpdate's own comment
 let pendingUpdateConfirmation = null; // set at startup if .self-update-state.json has one waiting
@@ -2042,35 +2065,150 @@ function saveSelfUpdateState(state) {
 // Real, at startup (module load, not inside any cycle) - if the LAST process to run left a
 // pendingUpdate marker, this process is very likely the freshly-restarted result of that update
 // (the installer stops and relaunches this exact process as part of its own already-existing
-// upgrade path - see PulseEndpoint.iss's CurStepChanged). Confirmed, not assumed: only once THIS
-// process's own first heartbeat cycle actually succeeds (see runBackendCycle below) - a process
-// that starts but can never reach the backend has not proven anything about the update's success.
+// upgrade path - see PulseEndpoint.iss's CurStepChanged). startCount tracks how many process
+// startups have now observed this same pendingUpdate: 1 is the normal, expected post-install
+// restart (nothing to reset); 2+ means THIS process itself has already died and restarted at
+// least once since the update, before ever reaching this same point again - real evidence of
+// instability, not a fresh chance, so heartbeat progress resets to zero (the deadline itself
+// never moves - see this section's own top comment on why a crash-loop should make it expire
+// sooner, not later).
 (function primeSelfUpdateConfirmation() {
   const state = loadSelfUpdateState();
   if (state.pendingUpdate) {
     pendingUpdateConfirmation = state.pendingUpdate;
+    pendingUpdateConfirmation.startCount = (pendingUpdateConfirmation.startCount ?? 0) + 1;
+    if (pendingUpdateConfirmation.startCount > 1) {
+      pendingUpdateConfirmation.consecutiveHeartbeats = 0;
+      console.warn(
+        `[telemetry] self-update to v${pendingUpdateConfirmation.toVersion} restarted during confirmation (start #${pendingUpdateConfirmation.startCount}) - resetting heartbeat progress, deadline unchanged.`,
+      );
+    }
+    saveSelfUpdateState({ ...state, pendingUpdate: pendingUpdateConfirmation });
     console.log(
-      `[telemetry] found a pending self-update confirmation (v${state.pendingUpdate.fromVersion} -> v${state.pendingUpdate.toVersion}, sequence ${state.pendingUpdate.sequence}) - will confirm on first successful heartbeat.`,
+      `[telemetry] found a pending self-update confirmation (v${pendingUpdateConfirmation.fromVersion} -> v${pendingUpdateConfirmation.toVersion}, sequence ${pendingUpdateConfirmation.sequence}) - will confirm after ${SELF_UPDATE_HEARTBEATS_REQUIRED} consecutive successful heartbeats, within ${SELF_UPDATE_CONFIRM_WINDOW_MS / 60000} minutes of ${pendingUpdateConfirmation.startedAt}.`,
     );
   }
 })();
 
-// Real, once - runs on this process's first successful backend cycle after a self-update, not
-// tied to any specific N-minute deadline (see this section's own top comment on why an
-// unconfirmed device is left to existing offline-detection rather than a new timeout mechanism).
-function confirmSelfUpdateIfPending() {
-  if (!pendingUpdateConfirmation) return;
-  const { fromVersion, toVersion, sequence } = pendingUpdateConfirmation;
-  logEvent(
-    "self-update-succeeded",
-    `Agent updated v${fromVersion} -> v${toVersion} (sequence ${sequence}) and confirmed itself reachable after restart.`,
-    "info",
-  );
-  console.log(`[telemetry] self-update to v${toVersion} confirmed.`);
-  pendingUpdateConfirmation = null;
+function persistPendingUpdate() {
   const state = loadSelfUpdateState();
-  delete state.pendingUpdate;
-  saveSelfUpdateState(state);
+  saveSelfUpdateState({ ...state, pendingUpdate: pendingUpdateConfirmation });
+}
+
+// Real, in-process rollback - the actual re-download+verify+install, triggered only once this
+// device's own next cycle finds the confirmation deadline passed without enough consecutive
+// heartbeats (see processPendingSelfUpdate below, the one real caller). previousManifest is the
+// last manifest THIS device verified via signature before this update was even attempted
+// (captured in launchSilentInstall from what was lastAcceptedManifest at that moment) -
+// re-verifying a freshly re-downloaded copy against that already-trusted sha256 needs no new
+// signature check and no new backend endpoint, since the device already proved this exact
+// combination genuine once. Terminal action for this update attempt: does not arm a fresh
+// pendingUpdate for the rolled-back version - if that version is somehow also broken, that's a
+// distinct, worse problem out of this v1's scope, not silently chained into another attempt.
+async function triggerSelfUpdateRollback() {
+  const pending = pendingUpdateConfirmation;
+  if (!pending) return;
+
+  logEvent(
+    "self-update-unhealthy",
+    `Agent update v${pending.fromVersion} -> v${pending.toVersion} (sequence ${pending.sequence}) did not confirm healthy within ${SELF_UPDATE_CONFIRM_WINDOW_MS / 60000} minutes (${pending.consecutiveHeartbeats ?? 0}/${SELF_UPDATE_HEARTBEATS_REQUIRED} consecutive heartbeats) - attempting automatic rollback.`,
+    "warning",
+  );
+
+  const previousManifest = pending.previousManifest;
+  if (!previousManifest || !previousManifest.version || !previousManifest.sha256) {
+    console.error(
+      "[telemetry] self-update rollback needed but no previousManifest is available (this device's first-ever self-update has no prior verified version to return to) - leaving pendingUpdate in place for a human to investigate.",
+    );
+    return;
+  }
+
+  // Real, file-based claim - watchdog.ps1 independently checks this same pendingUpdate on its
+  // own 1-minute schedule for the case this process crashes too fast to ever reach this point
+  // itself. Whichever gets here first claims it; the other sees rollbackClaimed already set and
+  // skips, rather than both launching a silent install at once.
+  const claimState = loadSelfUpdateState();
+  if (claimState.pendingUpdate?.rollbackClaimed) {
+    console.log("[telemetry] rollback already claimed (likely by watchdog.ps1) - skipping.");
+    return;
+  }
+  saveSelfUpdateState({ ...claimState, pendingUpdate: { ...claimState.pendingUpdate, rollbackClaimed: true } });
+
+  let installerBytes;
+  try {
+    const downloadUrl = `${BACKEND_URL}/v1/agent/download?version=${encodeURIComponent(previousManifest.version)}`;
+    installerBytes = await downloadInstaller(downloadUrl);
+  } catch (err) {
+    logEvent("self-update-rejected", `Rollback to v${previousManifest.version} failed: download failed (${err.message}).`, "critical");
+    return;
+  }
+
+  const actualSha256 = crypto.createHash("sha256").update(installerBytes).digest("hex");
+  if (actualSha256 !== previousManifest.sha256) {
+    logEvent(
+      "self-update-rejected",
+      `Rollback to v${previousManifest.version} refused: downloaded installer's real SHA-256 (${actualSha256}) does not match the previously-verified one (${previousManifest.sha256}) - corrupted download.`,
+      "critical",
+    );
+    return;
+  }
+
+  const tempInstallerPath = path.join(os.tmpdir(), `PulseEndpointRollback-${previousManifest.version}.exe`);
+  fs.writeFileSync(tempInstallerPath, installerBytes);
+
+  logEvent(
+    "self-update-rolled-back",
+    `Rolling back v${pending.toVersion} -> v${previousManifest.version} (sequence ${previousManifest.sequence}) after it failed to confirm healthy - launching silent install of the previously-verified version.`,
+    "critical",
+  );
+
+  // lastAcceptedManifest already reflects previousManifest (it was the accepted manifest before
+  // this whole update attempt) - no change needed there. pendingUpdate is cleared entirely, not
+  // replaced, per this function's own top comment.
+  const finalState = loadSelfUpdateState();
+  delete finalState.pendingUpdate;
+  saveSelfUpdateState(finalState);
+  pendingUpdateConfirmation = null;
+
+  const child = spawn(tempInstallerPath, ["/VERYSILENT", "/TYPE=agent", `/BACKENDURL=${BACKEND_URL}`], {
+    detached: true,
+    stdio: "ignore",
+  });
+  child.unref();
+}
+
+// The one real entry point for the health contract, called once per cycle (see runBackendCycle)
+// regardless of THIS cycle's own heartbeat outcome - the rollback deadline must be evaluated even
+// on a cycle where the heartbeat itself failed, since that's exactly the case rollback exists
+// for. heartbeatOk is this cycle's own real, fresh heartbeat result, never a cached value.
+async function processPendingSelfUpdate(heartbeatOk) {
+  if (!pendingUpdateConfirmation) return;
+
+  if (heartbeatOk) {
+    pendingUpdateConfirmation.consecutiveHeartbeats = (pendingUpdateConfirmation.consecutiveHeartbeats ?? 0) + 1;
+    persistPendingUpdate();
+
+    if (pendingUpdateConfirmation.consecutiveHeartbeats >= SELF_UPDATE_HEARTBEATS_REQUIRED) {
+      const { fromVersion, toVersion, sequence } = pendingUpdateConfirmation;
+      logEvent(
+        "self-update-succeeded",
+        `Agent updated v${fromVersion} -> v${toVersion} (sequence ${sequence}) and confirmed healthy after ${SELF_UPDATE_HEARTBEATS_REQUIRED} consecutive successful heartbeats.`,
+        "info",
+      );
+      console.log(`[telemetry] self-update to v${toVersion} confirmed healthy.`);
+      pendingUpdateConfirmation = null;
+      const state = loadSelfUpdateState();
+      delete state.pendingUpdate;
+      saveSelfUpdateState(state);
+      return;
+    }
+  }
+
+  const startedAtMs = new Date(pendingUpdateConfirmation.startedAt).getTime();
+  const deadlinePassed = Number.isFinite(startedAtMs) && Date.now() - startedAtMs > SELF_UPDATE_CONFIRM_WINDOW_MS;
+  if (!deadlinePassed) return;
+
+  await triggerSelfUpdateRollback();
 }
 
 // Positive if a is newer than b, negative if older, 0 if equal, null if either side isn't a real
@@ -2151,10 +2289,19 @@ async function downloadInstaller(downloadUrl) {
 // very likely to be killed shortly by the installer's own existing stop-everything step (see
 // PulseEndpoint.iss's CurStepChanged, already real and tested), which is expected, not a bug. The
 // pendingUpdate marker is written BEFORE launching so intent survives even if this process dies
-// before the spawn call itself finishes.
-function launchSilentInstall(installerPath, fromVersion, manifest) {
+// before the spawn call itself finishes. previousManifest (the manifest this device had already
+// verified via signature, before this update) becomes the rollback target - see this section's
+// own top comment.
+function launchSilentInstall(installerPath, fromVersion, manifest, previousManifest) {
+  const state = loadSelfUpdateState();
   saveSelfUpdateState({
-    pendingUpdate: { fromVersion, toVersion: manifest.version, sequence: manifest.sequence, startedAt: new Date().toISOString() },
+    ...state,
+    pendingUpdate: {
+      fromVersion, toVersion: manifest.version, sequence: manifest.sequence,
+      startedAt: new Date().toISOString(),
+      consecutiveHeartbeats: 0, startCount: 0,
+      previousManifest,
+    },
   });
   const child = spawn(installerPath, ["/VERYSILENT", "/TYPE=agent", `/BACKENDURL=${BACKEND_URL}`], {
     detached: true,
@@ -2163,7 +2310,7 @@ function launchSilentInstall(installerPath, fromVersion, manifest) {
   child.unref();
   logEvent(
     "self-update-started",
-    `Downloaded and verified v${manifest.version} (sequence ${manifest.sequence}) - launching silent install. This device's next heartbeat after restart confirms success.`,
+    `Downloaded and verified v${manifest.version} (sequence ${manifest.sequence}) - launching silent install. Confirms healthy after ${SELF_UPDATE_HEARTBEATS_REQUIRED} consecutive successful heartbeats, or rolls back automatically after ${SELF_UPDATE_CONFIRM_WINDOW_MS / 60000} minutes without them.`,
     "info",
   );
 }
@@ -2195,9 +2342,13 @@ async function checkAndApplySelfUpdate() {
   // device has ever accepted, persisted across restarts. A validly-signed manifest that's merely
   // OLD (sequence <= last accepted) is rejected exactly the same as an unsigned one - a genuine
   // release the fleet already moved past, or a replayed one, look identical from here, and both
-  // are correctly refused.
+  // are correctly refused. lastAcceptedManifest (the full manifest, not just its sequence) is
+  // also this update's own rollback target if it later fails to confirm healthy - see this
+  // section's own top comment on why retaining the whole thing, not just the number, is what
+  // makes an automatic rollback possible without a new signature check or backend endpoint.
   const state = loadSelfUpdateState();
-  const lastAccepted = state.lastAcceptedSequence ?? 0;
+  const previousManifest = state.lastAcceptedManifest ?? null;
+  const lastAccepted = previousManifest?.sequence ?? 0;
   if (manifest.sequence <= lastAccepted) {
     logEvent(
       "self-update-rejected",
@@ -2230,11 +2381,15 @@ async function checkAndApplySelfUpdate() {
     // Persisted now, before install - anti-replay is about having accepted this manifest as
     // genuine, a separate concern from whether the install itself later succeeds (see this
     // section's own top comment on why install-success confirmation is a distinct later step).
-    saveSelfUpdateState({ ...state, lastAcceptedSequence: manifest.sequence });
+    const acceptedManifest = {
+      version: manifest.version, sha256: manifest.sha256, sequence: manifest.sequence,
+      ring: manifest.ring, installer: manifest.installer,
+    };
+    saveSelfUpdateState({ ...state, lastAcceptedManifest: acceptedManifest });
 
     const tempInstallerPath = path.join(os.tmpdir(), `PulseEndpointSelfUpdate-${manifest.version}.exe`);
     fs.writeFileSync(tempInstallerPath, installerBytes);
-    launchSilentInstall(tempInstallerPath, AGENT_VERSION, manifest);
+    launchSilentInstall(tempInstallerPath, AGENT_VERSION, manifest, previousManifest);
   } finally {
     selfUpdateInProgress = false;
   }
@@ -2785,13 +2940,12 @@ async function runBackendCycle() {
     }
   }
 
-  // PRD §31 Self-Update v1 - a real, successful heartbeat is this process's own proof it's
-  // reachable post-restart (see confirmSelfUpdateIfPending's own comment on why that's the real
-  // health check here, not a timer). Checked before looking for a NEW update below, so a process
-  // still confirming a just-applied one never also tries to start another.
-  if (heartbeat?.ok) {
-    confirmSelfUpdateIfPending();
-  }
+  // PRD §31 Self-Update v1 - evaluated every cycle regardless of THIS cycle's own heartbeat
+  // outcome (see processPendingSelfUpdate's own comment on why the rollback deadline still needs
+  // checking on a cycle where the heartbeat itself failed). Checked before looking for a NEW
+  // update below, so a process still confirming (or rolling back) a just-applied one never also
+  // tries to start another.
+  await processPendingSelfUpdate(!!heartbeat?.ok);
 
   try {
     await checkAndApplySelfUpdate();

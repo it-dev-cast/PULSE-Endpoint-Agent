@@ -24,6 +24,70 @@ $logFile = Join-Path $stateDir "watchdog.log"
 # resets its counter to 0) - e.g. after a manual fix or a real reboot.
 $maxMisses = 15
 
+# PRD §31 Self-Update v1 rollback safety net - telemetry-server.mjs's own processPendingSelfUpdate
+# (see that file's own top comment) evaluates the same real health contract (3 consecutive
+# heartbeats within 10 minutes) every cycle and rolls back in-process if it fails. This watchdog
+# checks the same persisted state independently, on its own 1-minute schedule, for the one case
+# that in-process logic can never catch itself: the new version crashing so fast (or so
+# completely) it never runs a single cycle at all - exactly why this script exists in the first
+# place (see its own top comment on Task Scheduler's restart-on-failure not covering this).
+# rollbackClaimed is the shared, file-based race guard both paths check before acting - whichever
+# gets there first claims it, the other skips.
+$serverDir = Join-Path (Split-Path $PSScriptRoot -Parent) "server"
+$selfUpdateStateFile = Join-Path $serverDir ".self-update-state.json"
+$deviceCredsFile = Join-Path $serverDir ".device-credentials.json"
+$agentConfigFile = Join-Path $serverDir "pulse-agent.config.json"
+$selfUpdateConfirmWindowMinutes = 10
+
+# Real DPAPI unprotect for .device-credentials.json - same LocalMachine scope
+# telemetry-server.mjs itself uses (see that file's own comment on why: the Scheduled Task's
+# service-account context isn't predictable, so LocalMachine, not CurrentUser, is what makes this
+# decryptable from here at all), so this script (also RunLevel Highest) can read the same file
+# regardless of which account either process actually runs under.
+function Get-DeviceCredentials($path) {
+    if (-not (Test-Path $path)) { return $null }
+    try {
+        $raw = Get-Content $path -Raw
+        try {
+            # Legacy plaintext format - same self-describing check telemetry-server.mjs uses
+            # (a real DPAPI blob is never valid JSON on its own).
+            return $raw | ConvertFrom-Json
+        } catch {
+            $bytes = [Convert]::FromBase64String($raw.Trim())
+            $unprotected = [System.Security.Cryptography.ProtectedData]::Unprotect($bytes, $null, [System.Security.Cryptography.DataProtectionScope]::LocalMachine)
+            return [System.Text.Encoding]::UTF8.GetString($unprotected) | ConvertFrom-Json
+        }
+    } catch {
+        return $null
+    }
+}
+
+function Get-BackendUrl($configPath) {
+    if (Test-Path $configPath) {
+        try {
+            $cfg = Get-Content $configPath -Raw | ConvertFrom-Json
+            if ($cfg.backendUrl) { return $cfg.backendUrl }
+        } catch {}
+    }
+    return "http://localhost:8443"
+}
+
+# Best-effort, matching telemetry-server.mjs's own postRealEvent - an audit event failing to log
+# doesn't undo the real rollback that already happened, so this never blocks on or throws past a
+# failed POST.
+function Send-DeviceEvent($backendUrl, $creds, $eventType, $message, $severity) {
+    if (-not $creds -or -not (Test-Path $curl)) { return }
+    $body = @{ eventType = $eventType; message = $message; severity = $severity } | ConvertTo-Json -Compress
+    $tmpFile = [System.IO.Path]::GetTempFileName()
+    try {
+        Set-Content -Path $tmpFile -Value $body -NoNewline
+        & $curl -s -o NUL --max-time 10 -X POST "$backendUrl/v1/devices/$($creds.id)/events" -H "Authorization: Bearer $($creds.apiKey)" -H "Content-Type: application/json" --data "@$tmpFile" 2>$null | Out-Null
+    } catch {
+    } finally {
+        Remove-Item $tmpFile -Force -ErrorAction SilentlyContinue
+    }
+}
+
 # telemetry-server and command-center are matched by their listening TCP port, not process
 # identity - both run elevated (RunLevel Highest / a separate integrity level from whatever
 # unelevated context might inspect them), and Win32_Process.CommandLine came back blank when
@@ -49,6 +113,61 @@ if ($telemetryListen -and (Test-Path $curl)) {
             "$(Get-Date -Format o)  PulseEndpointTelemetryServer was stale (GET /api/enrollment HTTP 404) - restarted" | Add-Content $logFile
         } catch {
             "$(Get-Date -Format o)  failed to restart stale PulseEndpointTelemetryServer: $_" | Add-Content $logFile
+        }
+    }
+}
+
+# The actual rollback check - only relevant when telemetry-server isn't even listening (a
+# healthy or merely-stale-but-running process is left entirely to its own in-process
+# processPendingSelfUpdate; this is purely the "can't run its own logic at all" backstop).
+if (-not $telemetryListen -and (Test-Path $selfUpdateStateFile)) {
+    try {
+        $selfUpdateState = Get-Content $selfUpdateStateFile -Raw | ConvertFrom-Json
+    } catch {
+        $selfUpdateState = $null
+    }
+    $pending = $selfUpdateState.pendingUpdate
+    if ($pending -and -not $pending.rollbackClaimed -and $pending.previousManifest -and $pending.previousManifest.sha256) {
+        $startedAt = [DateTimeOffset]::Parse($pending.startedAt)
+        $deadlinePassed = ([DateTimeOffset]::UtcNow - $startedAt).TotalMinutes -gt $selfUpdateConfirmWindowMinutes
+        if ($deadlinePassed) {
+            $prevVersion = $pending.previousManifest.version
+            $prevSha256 = $pending.previousManifest.sha256
+            "$(Get-Date -Format o)  self-update to v$($pending.toVersion) unconfirmed after $selfUpdateConfirmWindowMinutes min and telemetry-server not listening - watchdog attempting rollback to v$prevVersion" | Add-Content $logFile
+
+            # Claim first, before any network work - see this section's own top comment on why.
+            $pending | Add-Member -NotePropertyName rollbackClaimed -NotePropertyValue $true -Force
+            $selfUpdateState.pendingUpdate = $pending
+            $selfUpdateState | ConvertTo-Json -Depth 10 | Set-Content $selfUpdateStateFile
+
+            $backendUrl = Get-BackendUrl $agentConfigFile
+            $creds = Get-DeviceCredentials $deviceCredsFile
+            $downloadUrl = "$backendUrl/v1/agent/download?version=$prevVersion"
+            $tempInstaller = Join-Path $env:TEMP "PulseEndpointRollback-$prevVersion.exe"
+
+            try {
+                Invoke-WebRequest -Uri $downloadUrl -OutFile $tempInstaller -UseBasicParsing -TimeoutSec 120
+                $actualHash = (Get-FileHash -Path $tempInstaller -Algorithm SHA256).Hash.ToLower()
+                if ($actualHash -ne $prevSha256.ToLower()) {
+                    "$(Get-Date -Format o)  rollback download sha256 mismatch (expected $prevSha256, got $actualHash) - aborting rollback" | Add-Content $logFile
+                    Send-DeviceEvent $backendUrl $creds "self-update-rejected" "Watchdog rollback to v$prevVersion refused: downloaded installer's real SHA-256 ($actualHash) does not match the previously-verified one ($prevSha256) - corrupted download." "critical"
+                } else {
+                    Send-DeviceEvent $backendUrl $creds "self-update-unhealthy" "Agent update v$($pending.fromVersion) -> v$($pending.toVersion) (sequence $($pending.sequence)) did not confirm healthy within $selfUpdateConfirmWindowMinutes minutes, and the process stopped responding entirely - watchdog attempting automatic rollback." "warning"
+                    Send-DeviceEvent $backendUrl $creds "self-update-rolled-back" "Watchdog rolling back v$($pending.toVersion) -> v$prevVersion (sequence $($pending.previousManifest.sequence)) after it stopped responding and failed to confirm healthy - launching silent install of the previously-verified version." "critical"
+
+                    $selfUpdateState.PSObject.Properties.Remove('pendingUpdate')
+                    $selfUpdateState | ConvertTo-Json -Depth 10 | Set-Content $selfUpdateStateFile
+                    Start-Process -FilePath $tempInstaller -ArgumentList "/VERYSILENT", "/TYPE=agent", "/BACKENDURL=$backendUrl" -WindowStyle Hidden
+                    # Same reasoning as $justRestartedTelemetry above - the targets loop below
+                    # should not also Start-ScheduledTask this same target in the same pass; the
+                    # installer's own existing stop/replace/restart step (already real, see
+                    # PulseEndpoint.iss's CurStepChanged) is what actually brings it back.
+                    $justRestartedTelemetry = $true
+                    "$(Get-Date -Format o)  rollback installer launched for v$prevVersion" | Add-Content $logFile
+                }
+            } catch {
+                "$(Get-Date -Format o)  rollback download/verify failed: $_" | Add-Content $logFile
+            }
         }
     }
 }
