@@ -219,6 +219,15 @@ export type EntitlementSnapshot = {
   // "Warning", or "Expired" derived live from baseline-tamper/device-identity signals and real
   // entitlement standing. null means no hardware baseline is locked yet to derive it from.
   warrantyState: "Active" | "Warning" | "Expired" | null;
+  // PRD §7's real 72h offline-tolerance window (telemetry-server.mjs's resolveEntitlementState) -
+  // lastVerifiedAt is when this data was last actually confirmed via a successful fetch (whether
+  // this exact response is fresh or served from local-agent's on-disk cache). stale is true only
+  // when today's live fetch failed and this is a cached read; unverified is true only once that
+  // cached read is older than the 72h tolerance - a third, honest state distinct from both a live
+  // status and the null above (which means never once verified at all, nothing to fall back to).
+  lastVerifiedAt: string;
+  stale: boolean;
+  unverified: boolean;
 } | null;
 
 // Real backend.compareFingerprints result (Hardware page's Tamper Detection) - updated by

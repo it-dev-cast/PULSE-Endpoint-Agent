@@ -4726,12 +4726,21 @@ function getEntitlementDaysUntilExpiry(iso: string): number {
 // Colors for backend/'s real status vocabulary (Active/Expiring/Grace/Expired/Suspended, the
 // same PRD §7 vocabulary the schema's CHECK constraint enforces) - a status this app doesn't
 // recognize falls back to Active's color rather than crashing on a missing lookup.
+//
+// Unverified is NOT one of those 5 - it's a 6th, locally-synthesized label for a real but
+// different fact: local-agent's own 72h offline-tolerance window (resolveEntitlementState) has
+// been exceeded with no successful backend contact, so whatever status is cached could be stale
+// beyond honest use. Colored the same neutral gray as this app's other "can't currently confirm"
+// states (e.g. "DB Unknown" below), not reusing Suspended/Expired's red - this is a connectivity
+// fact, not a real subscription standing, and conflating the two would misrepresent which one it
+// actually is.
 const ENTITLEMENT_STATUS_META: Record<string, { color: string; bg: string }> = {
   Active: { color: "var(--clpa-primary)", bg: "rgba(var(--clpa-primary-rgb),0.1)" },
   Expiring: { color: "var(--clpa-warning)", bg: "rgba(var(--clpa-warning-bright-rgb),0.12)" },
   Grace: { color: "var(--clpa-warning)", bg: "rgba(var(--clpa-warning-bright-rgb),0.12)" },
   Expired: { color: "var(--clpa-critical)", bg: "rgba(var(--clpa-critical-bright-rgb),0.1)" },
   Suspended: { color: "var(--clpa-critical)", bg: "rgba(var(--clpa-critical-bright-rgb),0.1)" },
+  Unverified: { color: "var(--clpa-subtle)", bg: "rgba(var(--clpa-subtle-rgb),0.12)" },
 };
 
 // KPI 2: Subscription only — plan + renewal (no feature tags)
@@ -4745,8 +4754,14 @@ function WSubscriptionStatusCard() {
   const expiresAtReal = entitlementReal && entitlement.expiresAt != null;
 
   const planLabel = entitlementReal ? entitlement.plan : "—";
-  const statusLabel = entitlementReal ? entitlement.status : "Unknown";
+  // unverified (past the 72h offline-tolerance window) overrides the real cached status with the
+  // honest "Unverified" label - stale-but-within-window still shows the real status as-is (see
+  // the "Last verified" line below for that case's own transparency cue).
+  const statusLabel = !entitlementReal ? "Unknown" : entitlement.unverified ? "Unverified" : entitlement.status;
   const statusMeta = ENTITLEMENT_STATUS_META[statusLabel] ?? ENTITLEMENT_STATUS_META.Active;
+  const lastVerifiedLabel = entitlementReal && entitlement.stale
+    ? `Last verified ${formatRelativeTime(entitlement.lastVerifiedAt) ?? "a while ago"}`
+    : null;
   const expiryDateLabel = expiresAtReal ? formatEntitlementDate(entitlement.expiresAt as string) : "—";
   const daysUntilExpiry = expiresAtReal ? getEntitlementDaysUntilExpiry(entitlement.expiresAt as string) : null;
   const renewsInLabel =
@@ -4772,6 +4787,11 @@ function WSubscriptionStatusCard() {
           <div className="flex items-center gap-1" style={{ marginTop: 2 }}>
             <span style={{ fontSize: 9, color: "var(--clpa-muted)" }}>{entitlementReal ? "Plan from Command Centre" : "Not synced"}</span>
           </div>
+          {lastVerifiedLabel && (
+            <div className="flex items-center gap-1" style={{ marginTop: 2 }}>
+              <span style={{ fontSize: 8.5, color: "var(--clpa-warning)" }}>{lastVerifiedLabel}</span>
+            </div>
+          )}
           <div className="flex items-center gap-1" style={{ marginTop: 8 }}>
             <span style={{ fontSize: 16, fontWeight: 900, color: "var(--clpa-title)", lineHeight: 1 }}>{expiryDateLabel}</span>
           </div>

@@ -95,11 +95,24 @@ const RELEASE_PUBLIC_KEY_B64 = "UjQeOVEt9lKOzZlf9JFd6jXoiT+1xtjv1RFfGbpK43Q=";
 // against a local attacker rolling this specific file back - that stronger guarantee is what a
 // future TPM-sealed counter would add, deliberately deferred for this v1 (disclosed, not hidden).
 const SELF_UPDATE_STATE_PATH = path.join(__dirname, ".self-update-state.json");
+// Real, persisted last-known-good entitlement + when it was actually last confirmed - mirrors
+// SELF_UPDATE_STATE_PATH's own load-once-at-startup, write-on-change pattern exactly. Plain,
+// unencrypted JSON like METRIC_SNAPSHOT_STATE_PATH below, not DPAPI-protected like
+// DEVICE_CREDENTIALS_PATH - this is a cached read of what the backend already told this device,
+// not a secret.
+const ENTITLEMENT_CACHE_PATH = path.join(__dirname, ".entitlement-cache.json");
 // Entitlement/heartbeat don't need the same 5s cadence as hardware telemetry - a subscription
 // plan or last-seen timestamp doesn't change fast enough to justify polling it 12x/minute, and
 // this is a separate named interval specifically so that policy is visible and adjustable in
 // one place rather than a magic number buried in a setTimeout call.
 const BACKEND_POLL_INTERVAL_MS = 60000;
+// PRD §7's real 72h offline-tolerance window (see resolveEntitlementState below) - within it, a
+// failed poll still serves the last successfully-verified entitlement (marked stale) rather than
+// collapsing to the genuine "Unknown" of a device that has never once reached the backend; past
+// it, an honest "unverified" state takes over instead of continuing to vouch for a read that
+// could be days old. Named here, not a magic number, same convention as every other interval
+// above.
+const ENTITLEMENT_OFFLINE_TOLERANCE_MS = 72 * 60 * 60 * 1000;
 // Hardware tamper/change detection (real device-registry hardware baseline) doesn't need
 // BACKEND_POLL_INTERVAL_MS's own cadence either - the fields it compares (serials, model names,
 // installed capacity) never change between one minute and the next in legitimate use, so
@@ -177,10 +190,22 @@ let deviceCredentials = null;
 // accounts using the owner's 100.x IP (instead of the Shared-in IP) fail here and stay off
 // the Command Centre dashboard until the URL is corrected.
 let lastRegisterError = null;
-// { plan, status, expiresAt } | null - updated by runBackendCycle on its own slower interval,
-// read (not re-fetched) by collect() on every 5s cycle. null means backend/ is unreachable or
-// this device isn't enrolled yet - the frontend's SampleTag convention, not a fake plan name.
+// { plan, status, expiresAt, ..., lastVerifiedAt, stale, unverified } | null - updated by
+// runBackendCycle on its own slower interval via resolveEntitlementState below, read (not
+// re-fetched) by collect() on every 5s cycle. null means this device has never once successfully
+// reached the backend (no cache to fall back to either) - the frontend's SampleTag convention,
+// not a fake plan name. A non-null value can be a fresh live read (stale: false) or a real
+// last-known-good value served from entitlementCache while the backend is currently unreachable
+// (stale: true) - see resolveEntitlementState for the real 72h tolerance window that decides
+// between that and unverified: true.
 let entitlementState = null;
+// Real, persisted { deviceId, entitlement, lastVerifiedAt } from the last successful
+// fetchEntitlement - loaded once at startup (same pattern as pendingUpdateConfirmation above),
+// updated and persisted only on a fresh success in resolveEntitlementState below. deviceId is
+// checked before ever trusting this as a fallback - a cache left over from a previous enrollment
+// on this same machine (e.g. after a full reset/re-register) isn't a real fact about the device
+// currently running, so it's treated as no cache at all rather than a cross-identity leak.
+let entitlementCache = loadEntitlementCache();
 // Same transition-only logging pattern as lastRustOutcome above.
 let lastBackendOutcome = null;
 // boolean | null - real GET /v1/health result, updated by runBackendCycle. null means the
@@ -1853,6 +1878,22 @@ function loadSelfUpdateState() {
   }
 }
 
+function loadEntitlementCache() {
+  try {
+    return JSON.parse(fs.readFileSync(ENTITLEMENT_CACHE_PATH, "utf8"));
+  } catch {
+    return {};
+  }
+}
+
+function saveEntitlementCache(state) {
+  try {
+    fs.writeFileSync(ENTITLEMENT_CACHE_PATH, JSON.stringify(state, null, 2));
+  } catch (err) {
+    console.error("[telemetry] failed to persist entitlement cache:", err.message);
+  }
+}
+
 function saveSelfUpdateState(state) {
   try {
     fs.writeFileSync(SELF_UPDATE_STATE_PATH, JSON.stringify(state, null, 2));
@@ -2101,6 +2142,42 @@ async function fetchEntitlement(credentials) {
     console.error("[telemetry] fetchEntitlement failed:", err);
     return null;
   }
+}
+
+// PRD §7's 72h offline-tolerance window, applied once per cycle to fetchEntitlement's real
+// result. A fresh success (entitlement truthy) always wins and refreshes the on-disk cache - the
+// device just proved it can still reach the backend right now, so there's nothing to fall back
+// to. A failure falls back to entitlementCache, and distinguishes two real cases rather than
+// treating every failure identically: within ENTITLEMENT_OFFLINE_TOLERANCE_MS of the last real
+// success, the cached entitlement is still honestly usable (stale, but a real recent fact, not a
+// guess); past it, unverified takes over - a third state, distinct from both a live status and
+// the genuine "Unknown" of a device that has never once reached the backend (entitlementCache
+// empty, or left over from a different device id - e.g. this machine re-registered since).
+//
+// Deliberately does NOT gate any functionality on the resolved status (Active/Grace/Suspended/
+// etc.) - it only decides how to honestly LABEL what's known, same as entitlement.status already
+// did before this existed. Actual feature-gating per status (PRD §7's "full function vs degraded
+// vs blocked" behavior) stays out of scope here: there is no defined policy anywhere in this
+// codebase for what should specifically degrade at Grace or block at Suspended (the one real
+// feature gate that exists, isSelfHealingAllowed, is keyed on plan_features by plan tier, never
+// by entitlement status) - that's a real product decision nobody has made yet, not a missing
+// technical capability, so building it now would mean inventing policy rather than honestly
+// reporting its absence.
+function resolveEntitlementState(deviceCredentials, entitlement) {
+  const now = Date.now();
+  if (entitlement) {
+    entitlementCache = { deviceId: deviceCredentials.id, entitlement, lastVerifiedAt: new Date(now).toISOString() };
+    saveEntitlementCache(entitlementCache);
+    return { ...entitlement, lastVerifiedAt: entitlementCache.lastVerifiedAt, stale: false, unverified: false };
+  }
+  if (entitlementCache.deviceId !== deviceCredentials.id || !entitlementCache.lastVerifiedAt) return null;
+  const ageMs = now - Date.parse(entitlementCache.lastVerifiedAt);
+  return {
+    ...entitlementCache.entitlement,
+    lastVerifiedAt: entitlementCache.lastVerifiedAt,
+    stale: true,
+    unverified: ageMs > ENTITLEMENT_OFFLINE_TOLERANCE_MS,
+  };
 }
 
 // Builds the real hardware fingerprint backend/'s POST /v1/devices/:id/hardware-check compares
@@ -2507,7 +2584,7 @@ async function runBackendCycle() {
     dbHealthPromise,
     scheduledTasksPromise,
   ]);
-  entitlementState = entitlement;
+  entitlementState = resolveEntitlementState(deviceCredentials, entitlement);
   dbHealthyState = dbHealthy;
   scheduledTaskState = scheduledTasks;
 
