@@ -49,6 +49,13 @@ import { useTelemetry } from "../hooks/useTelemetry";
 
 const STUN_SERVER: RTCIceServer = { urls: "stun:stun.l.google.com:19302" };
 const CONNECT_TIMEOUT_MS = 15000;
+// Share-side signaling-socket reconnect backoff - same doubling schedule as dashboard's own
+// sse.js reconnect (1s -> 2s -> 4s -> ... capped at 30s), reset to the initial value on every
+// real successful reconnect. Chosen to comfortably fit inside the backend's own
+// sessionRemovalGracePeriod (25s, remote_session.go) - several attempts land before the backend
+// would ever actually give up on this session.
+const SIGNAL_INITIAL_RETRY_MS = 1000;
+const SIGNAL_MAX_RETRY_MS = 30000;
 
 type TurnCredentialsResponse =
   | { configured: true; urls: string[]; username: string; credential: string }
@@ -196,6 +203,26 @@ async function createRemoteSession(mode: "screen" | "voice" | "chat"): Promise<{
 async function openSessionSocket(sessionId: string): Promise<WebSocket> {
   const origin = await getBackendWsOrigin();
   return new WebSocket(`${origin}/v1/remote-sessions/${sessionId}/ws`);
+}
+
+// Real signal for "is this session genuinely gone" vs "can't reach the backend right now" -
+// a raw WebSocket's onerror/onclose expose no HTTP status on a failed handshake (a real browser
+// API limitation), so scheduleShareReconnect below calls this plain HTTP existence check
+// instead (backend/remote_session.go's handleRemoteSessionExists) to decide whether to keep
+// retrying or show a terminal "this session has ended" message. true/false are both confident
+// answers; null means the check itself couldn't reach the backend - treated the same as "still
+// exists" (keep retrying), since a network problem reaching the backend says nothing about
+// whether the session itself is still there.
+async function checkSessionExists(sessionId: string): Promise<boolean | null> {
+  try {
+    const wsOrigin = await getBackendWsOrigin();
+    const res = await fetch(`${wsOrigin.replace(/^ws/, "http")}/v1/remote-sessions/${sessionId}`);
+    if (res.status === 404) return false;
+    if (res.ok) return true;
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 // PRD §30 Remote Assist hardening - join-request/join-denied are the real consent gate (see this
@@ -592,7 +619,12 @@ export default function ScreenSharePOC() {
   const [enrollment, setEnrollment] = useState<EnrollmentStatus | null>(null);
 
   // Share role state
-  const [shareStatus, setShareStatus] = useState<"idle" | "starting" | "creating-session" | "waiting-for-peer" | "completing">("idle");
+  // "reconnecting" - the signaling socket dropped unexpectedly (network blip, not a real end of
+  // session) while still waiting for an operator; see connectShareSocket/scheduleShareReconnect
+  // below. Distinct from "waiting-for-peer" purely for honest UI copy - the underlying wait is
+  // the same, but a genuine reconnect is worth saying out loud rather than looking identical to
+  // the very first wait.
+  const [shareStatus, setShareStatus] = useState<"idle" | "starting" | "creating-session" | "waiting-for-peer" | "reconnecting" | "completing">("idle");
   const [shareError, setShareError] = useState<string | null>(null);
   const [sessionId, setSessionId] = useState("");
   const [sessionMode, setSessionMode] = useState<"screen" | "voice" | "chat">("screen");
@@ -637,6 +669,17 @@ export default function ScreenSharePOC() {
   const dcRef = useRef<RTCDataChannel | null>(null);
   const dataChannelHandleRef = useRef<DataChannelHandle | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  // Share-side signaling socket resilience (matches sse.js's own reconnect-with-backoff
+  // pattern) - see connectShareSocket/scheduleShareReconnect below.
+  // True only while WE are deliberately closing the socket (Reset, unmount) - lets onclose tell
+  // an intentional close apart from a real, unexpected drop worth reconnecting.
+  const intentionalCloseRef = useRef(false);
+  // True once approveJoinRequest has actually sent the real offer - past that point the
+  // signaling socket has nothing left to do (this POC's offer/answer exchange happens exactly
+  // once), so a later drop isn't worth reconnecting.
+  const offerSentRef = useRef(false);
+  const reconnectBackoffRef = useRef(SIGNAL_INITIAL_RETRY_MS);
+  const reconnectTimerRef = useRef<number | null>(null);
   // PRD §30 Remote Assist hardening - real session-duration tracking for the "session ended"
   // audit event: set the instant a join is actually approved (not session creation - "duration"
   // means how long an operator was actually connected, not how long this customer sat waiting).
@@ -860,6 +903,13 @@ export default function ScreenSharePOC() {
     endRemoteSession();
     if (connectTimerRef.current != null) window.clearTimeout(connectTimerRef.current);
     connectTimerRef.current = null;
+    // Real close, on purpose - tells connectShareSocket's onclose this wasn't an unexpected
+    // drop, so it doesn't schedule a reconnect for a session that's being deliberately ended.
+    intentionalCloseRef.current = true;
+    offerSentRef.current = false;
+    if (reconnectTimerRef.current != null) window.clearTimeout(reconnectTimerRef.current);
+    reconnectTimerRef.current = null;
+    reconnectBackoffRef.current = SIGNAL_INITIAL_RETRY_MS;
     pcRef.current?.close();
     pcRef.current = null;
     wsRef.current?.close();
@@ -903,6 +953,10 @@ export default function ScreenSharePOC() {
   useEffect(() => {
     return () => {
       if (connectTimerRef.current != null) window.clearTimeout(connectTimerRef.current);
+      // Same real-close signal as resetAll's own - see its comment on why this matters to
+      // connectShareSocket's onclose.
+      intentionalCloseRef.current = true;
+      if (reconnectTimerRef.current != null) window.clearTimeout(reconnectTimerRef.current);
       pcRef.current?.close();
       wsRef.current?.close();
       dcRef.current?.close();
@@ -914,6 +968,62 @@ export default function ScreenSharePOC() {
   function switchRole(next: Role) {
     resetAll();
     setRole(next);
+  }
+
+  // Real found-live bug fix: a customer whose single signaling socket dropped (network blip,
+  // WebView2 process suspend, brief WiFi hiccup) while still waiting for an operator lost the
+  // whole session outright - remote_session.go used to remove a session the instant its peer
+  // count hit zero, so the drop was indistinguishable from a real end. Backend now holds a
+  // sessionRemovalGracePeriod (25s) before actually removing an empty session; this is the
+  // client half - reconnect to the SAME session id with the same doubling backoff dashboard's
+  // own sse.js already uses (1s -> 2s -> ... capped at 30s), reset on a real successful
+  // reconnect. Scoped to only the pre-negotiation window (offerSentRef false) - once
+  // approveJoinRequest has actually sent the real offer, this POC's one-shot offer/answer
+  // exchange is done and the signaling socket has nothing left to do, so a later drop isn't
+  // worth reconnecting.
+  async function connectShareSocket(sessionId: string) {
+    const ws = await openSessionSocket(sessionId);
+    wsRef.current = ws;
+    ws.onopen = () => {
+      reconnectBackoffRef.current = SIGNAL_INITIAL_RETRY_MS;
+      setShareStatus((prev) => (prev === "reconnecting" ? "waiting-for-peer" : prev));
+    };
+    ws.onmessage = (event) => {
+      let msg: SignalMessage;
+      try {
+        msg = JSON.parse(event.data);
+      } catch {
+        return;
+      }
+      if (msg.type === "join-request") {
+        setPendingJoinRequest(true);
+      } else if (msg.type === "answer" && msg.sdp) {
+        applyAnswer(msg.sdp);
+      }
+    };
+    // A WebSocket's onerror carries no diagnostic detail of its own and is always followed by
+    // onclose (per spec) - the real decision (reconnect vs. give up) happens there, once, rather
+    // than duplicated across both handlers.
+    ws.onclose = () => {
+      if (intentionalCloseRef.current || offerSentRef.current) return;
+      scheduleShareReconnect(sessionId);
+    };
+  }
+
+  async function scheduleShareReconnect(sessionId: string) {
+    const stillExists = await checkSessionExists(sessionId);
+    if (stillExists === false) {
+      setShareStatus("idle");
+      setShareError("This session has ended - the operator's join window closed. Start a new request.");
+      return;
+    }
+    // Exists, or the existence check itself couldn't reach the backend - either way, worth
+    // retrying rather than giving up (see checkSessionExists's own comment on the null case).
+    setShareStatus("reconnecting");
+    reconnectTimerRef.current = window.setTimeout(() => {
+      connectShareSocket(sessionId);
+    }, reconnectBackoffRef.current);
+    reconnectBackoffRef.current = Math.min(reconnectBackoffRef.current * 2, SIGNAL_MAX_RETRY_MS);
   }
 
   // ─── Share role ───────────────────────────────────────────
@@ -991,25 +1101,10 @@ export default function ScreenSharePOC() {
       return;
     }
     setSessionId(session.id);
-
-    const ws = await openSessionSocket(session.id);
-    wsRef.current = ws;
-    ws.onerror = () => {
-      setShareError("Failed to connect to the real signaling server (backend unreachable).");
-    };
-    ws.onmessage = (event) => {
-      let msg: SignalMessage;
-      try {
-        msg = JSON.parse(event.data);
-      } catch {
-        return;
-      }
-      if (msg.type === "join-request") {
-        setPendingJoinRequest(true);
-      } else if (msg.type === "answer" && msg.sdp) {
-        applyAnswer(msg.sdp);
-      }
-    };
+    intentionalCloseRef.current = false;
+    offerSentRef.current = false;
+    reconnectBackoffRef.current = SIGNAL_INITIAL_RETRY_MS;
+    await connectShareSocket(session.id);
 
     setShareStatus("waiting-for-peer");
     startRemoteSession(
@@ -1045,6 +1140,9 @@ export default function ScreenSharePOC() {
     }
     const msg: SignalMessage = { type: "offer", sdp: offer };
     ws.send(JSON.stringify(msg));
+    // Past this point the signaling socket's one job is done (this POC's offer/answer exchange
+    // happens exactly once) - a later drop isn't worth connectShareSocket's onclose reconnecting.
+    offerSentRef.current = true;
     operatorJoinedAtRef.current = Date.now();
     postRealEvent("remote-assist-operator-joined", `An operator was approved and joined this ${MODE_META[sessionMode].label} session.`, "info");
   }
@@ -1469,7 +1567,7 @@ export default function ScreenSharePOC() {
             </CLPACard>
           )}
 
-          {(shareStatus === "waiting-for-peer" || shareStatus === "completing") && (
+          {(shareStatus === "waiting-for-peer" || shareStatus === "reconnecting" || shareStatus === "completing") && (
             <CLPARowLike>
               <CLPACard style={{ padding: "12px 14px" }}>
                 {sessionMode === "screen" ? (
@@ -1548,6 +1646,7 @@ export default function ScreenSharePOC() {
                 ) : (
                   <>
                     {shareStatus === "waiting-for-peer" && <StatusPlaceholder label="Waiting for the other side to join…" />}
+                    {shareStatus === "reconnecting" && <StatusPlaceholder label="Reconnecting…" sub="A brief connection drop - retrying automatically. The session is still open." />}
                     {shareStatus === "completing" && <StatusPlaceholder label="Peer joined - completing connection…" />}
                   </>
                 )}
