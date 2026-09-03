@@ -1,4 +1,8 @@
 {
   "version": "0.1.0",
-  "installer": "PulseEndpointSetup.exe"
+  "installer": "PulseEndpointSetup-0.1.0.exe",
+  "sha256": "070707b9f57d8bf623073b4ed675a9df759749a0bbc77f26941acaac4e4fb144",
+  "sequence": 1,
+  "ring": "stable",
+  "signature": "cig5FQmnI50FGpjS+NGADXAUlQsQWaVNPeLBVVKe0wH7AkBNyaQBNW375hZ+X08fhV2ENp+XPboThNAnBFkzBQ=="
 }
