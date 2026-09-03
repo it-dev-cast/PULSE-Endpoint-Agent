@@ -176,9 +176,8 @@ type entitlementResponse struct {
 	// still real data, not hardcoded, and correctly reflects the one lifecycle state that can
 	// exist for a device that got this far.
 	DeviceStatus string `json:"deviceStatus"`
-	// WarrantyState is PRD Section 6.4's real, honest v1 (see warranty.go's own comment for
-	// exactly which of the five PRD states this can and can't be) - "" when there isn't yet a
-	// locked baseline to derive it from, never a fabricated default.
+	// WarrantyState is PRD Section 6.4's real, honest v1 (see warranty.go's own comment) - "" when
+	// there isn't yet a locked baseline to derive it from, never a fabricated default.
 	WarrantyState string `json:"warrantyState"`
 }
 
@@ -779,6 +778,120 @@ func handleResetFingerprint(db *DB, hub *liveHub) http.HandlerFunc {
 
 		writeJSON(w, http.StatusOK, map[string]string{"deviceId": device.ID, "status": "reset"})
 	}
+}
+
+type warrantyReviewRequest struct {
+	Decision string `json:"decision"`
+}
+
+// handleWarrantyReview is the real, human-confirmed adjudication step PRD §6.4's UnderReview and
+// Voided states require (see warranty.go's own comment) - admin-authenticated, same group as
+// revoke/reset-fingerprint, since this is a fleet-management decision, not something a device
+// does to itself.
+//
+// "confirm-voided" requires a real, currently-unresolved hardware-tamper-detected/
+// device-identity-invalid event to exist for this device - the dashboard's own UI only shows
+// this action when warrantyState === "UnderReview" already, but this is the same real
+// server-side enforcement every other consequential action in this file already gets, not
+// trusting the client alone.
+//
+// "dismiss" has no such guard - it IS handleResetFingerprint's own real escape hatch (the same
+// call, not a parallel copy), which is already unconditionally available for a legitimate
+// hardware upgrade regardless of whether a review happens to be pending.
+func handleWarrantyReview(db *DB, hub *liveHub) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		deviceID := chi.URLParam(r, "id")
+
+		device, _, err := getDeviceByID(db, deviceID)
+		if errors.Is(err, ErrNotFound) {
+			writeError(w, http.StatusNotFound, "device not found")
+			return
+		}
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "internal error")
+			return
+		}
+
+		var req warrantyReviewRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid request body")
+			return
+		}
+
+		now := time.Now()
+
+		switch req.Decision {
+		case "confirm-voided":
+			if device.WarrantyVoidedAt != nil {
+				writeError(w, http.StatusConflict, "device's warranty is already voided")
+				return
+			}
+			if device.FingerprintLockedAt == nil {
+				writeError(w, http.StatusConflict, "no warranty review pending for this device")
+				return
+			}
+			lockedAt, err := time.Parse(time.RFC3339Nano, *device.FingerprintLockedAt)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "internal error")
+				return
+			}
+			unresolved, err := hasUnresolvedIntegrityEvent(db, device.ID, lockedAt)
+			if err != nil {
+				log.Printf("warranty-review: hasUnresolvedIntegrityEvent failed for %s: %v", device.ID, err)
+				writeError(w, http.StatusInternalServerError, "internal error")
+				return
+			}
+			if !unresolved {
+				writeError(w, http.StatusConflict, "no warranty review pending for this device")
+				return
+			}
+
+			if err := setWarrantyVoided(db, device.ID, now); err != nil {
+				log.Printf("warranty-review: setWarrantyVoided failed for %s: %v", device.ID, err)
+				writeError(w, http.StatusInternalServerError, "failed to void warranty")
+				return
+			}
+			msg := fmt.Sprintf(
+				"Warranty confirmed voided for device %s (%s) - a flagged hardware-tamper/device-identity event was reviewed and confirmed genuine.",
+				device.ID, device.Hostname,
+			)
+			fireWarrantyReviewEvent(db, hub, device, "warranty-review-voided", msg, "critical", now)
+			writeJSON(w, http.StatusOK, map[string]string{"deviceId": device.ID, "warrantyState": warrantyStateVoided})
+
+		case "dismiss":
+			if err := resetDeviceFingerprint(db, device.ID); err != nil {
+				log.Printf("warranty-review: resetDeviceFingerprint failed for %s: %v", device.ID, err)
+				writeError(w, http.StatusInternalServerError, "failed to dismiss review")
+				return
+			}
+			msg := fmt.Sprintf(
+				"Warranty review dismissed for device %s (%s) - the flagged event was reviewed and judged a false positive; hardware baseline reset, next hardware-check captures a fresh one.",
+				device.ID, device.Hostname,
+			)
+			fireWarrantyReviewEvent(db, hub, device, "warranty-review-dismissed", msg, "info", now)
+			writeJSON(w, http.StatusOK, map[string]string{"deviceId": device.ID, "status": "dismissed"})
+
+		default:
+			writeError(w, http.StatusBadRequest, `decision must be "confirm-voided" or "dismiss"`)
+		}
+	}
+}
+
+func fireWarrantyReviewEvent(db *DB, hub *liveHub, device *Device, eventType, message, severity string, now time.Time) {
+	eventID, err := newID("event")
+	if err != nil {
+		log.Printf("warranty-review: failed to generate %s event id: %v", eventType, err)
+		return
+	}
+	if err := insertEvent(db, eventID, device.TenantID, device.ID, eventType, message, severity, now); err != nil {
+		log.Printf("warranty-review: failed to log %s event: %v", eventType, err)
+		return
+	}
+	hub.publishEvent(device.TenantID, Event{
+		ID: eventID, TenantID: device.TenantID, DeviceID: device.ID,
+		EventType: eventType, Message: message, Severity: severity,
+		CreatedAt: now.UTC().Format(time.RFC3339Nano),
+	})
 }
 
 // handleSetDeviceTags overwrites a device's real tags - see setDeviceTags's own comment for why

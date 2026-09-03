@@ -56,6 +56,14 @@ CREATE INDEX IF NOT EXISTS idx_devices_tenant_id ON devices(tenant_id);
 ALTER TABLE devices ADD COLUMN IF NOT EXISTS device_identity_public_key TEXT;
 ALTER TABLE devices ADD COLUMN IF NOT EXISTS device_identity_attestation TEXT;
 
+-- PRD §6.4 Warranty State Machine's Voided state - a real, human-confirmed adjudication
+-- (POST /v1/devices/:id/warranty-review, decision "confirm-voided" - see warranty.go's own
+-- comment) that a flagged hardware-tamper-detected/device-identity-invalid event was genuine,
+-- not a false positive. Deliberately sticky, with no "un-void" path (see handleWarrantyReview's
+-- own comment) - once set, computeDeviceWarrantyState checks this before anything else and
+-- always returns Voided, regardless of any later, unrelated fingerprint reset.
+ALTER TABLE devices ADD COLUMN IF NOT EXISTS warranty_voided_at TEXT;
+
 -- Real, durable event history (AI Intel's Timeline/Insights cards) - unlike remote_session.go's
 -- in-memory signaling sessions, this genuinely belongs in SQLite: it's meant to survive a
 -- restart and answer "what actually happened on this device," not just exist for the duration

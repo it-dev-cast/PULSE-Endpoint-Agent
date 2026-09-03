@@ -164,6 +164,9 @@ func main() {
 			// Real, necessary escape hatch for a legitimate hardware upgrade - clears the
 			// locked baseline so the device's next hardware-check captures a fresh one.
 			r.Post("/devices/{id}/reset-fingerprint", handleResetFingerprint(db, liveHub))
+			// PRD §6.4 Warranty State Machine - the real, human-confirmed adjudication step
+			// UnderReview/Voided require (see warranty.go's own comment).
+			r.Post("/devices/{id}/warranty-review", handleWarrantyReview(db, liveHub))
 			r.Post("/devices/{id}/tags", handleSetDeviceTags(db))
 			// PRD §9 Self-Healing v1 remote dispatch - "run action X on device Y" (see
 			// device_commands.go's own comment for the one-pending-at-a-time v1 scope limit).

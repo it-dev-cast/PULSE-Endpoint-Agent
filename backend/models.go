@@ -30,6 +30,11 @@ type Device struct {
 	// for "Baseline Pending" vs "Baseline Locked," the same real state Tamper Detection itself
 	// already keys off of, not a separately-derived guess.
 	FingerprintLockedAt *string `json:"fingerprintLockedAt"`
+	// WarrantyVoidedAt is null until a real, human-confirmed warranty-review decision
+	// (POST /v1/devices/:id/warranty-review, "confirm-voided" - see warranty.go's own comment)
+	// - deliberately sticky, with no "un-void" path, so computeDeviceWarrantyState treats it as
+	// the one state that outranks everything else once set.
+	WarrantyVoidedAt *string `json:"warrantyVoidedAt"`
 	// Tags is real device grouping/organization - split from the single comma-separated
 	// storage column at read time (see splitTags/joinTags below), never stored as JSON in the
 	// column itself since a plain comma-separated TEXT is simpler for this project's real
@@ -195,9 +200,9 @@ func getDeviceByID(db *DB, id string) (*Device, string, error) {
 	var apiKeyHash string
 	var rawTags string
 	err := db.QueryRow(
-		`SELECT id, tenant_id, hostname, api_key_hash, enrolled_at, last_seen_at, status, fingerprint_locked_at, tags FROM devices WHERE id = ?`,
+		`SELECT id, tenant_id, hostname, api_key_hash, enrolled_at, last_seen_at, status, fingerprint_locked_at, warranty_voided_at, tags FROM devices WHERE id = ?`,
 		id,
-	).Scan(&d.ID, &d.TenantID, &d.Hostname, &apiKeyHash, &d.EnrolledAt, &d.LastSeenAt, &d.Status, &d.FingerprintLockedAt, &rawTags)
+	).Scan(&d.ID, &d.TenantID, &d.Hostname, &apiKeyHash, &d.EnrolledAt, &d.LastSeenAt, &d.Status, &d.FingerprintLockedAt, &d.WarrantyVoidedAt, &rawTags)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, "", ErrNotFound
 	}
@@ -234,7 +239,7 @@ func touchDeviceLastSeen(db *DB, id string, now time.Time) error {
 // status column, rather than deleting the row and losing that it ever existed).
 func listDevicesByTenant(db *DB, tenantID string) ([]Device, error) {
 	rows, err := db.Query(
-		`SELECT id, tenant_id, hostname, enrolled_at, last_seen_at, status, fingerprint_locked_at, tags FROM devices WHERE tenant_id = ? ORDER BY enrolled_at`,
+		`SELECT id, tenant_id, hostname, enrolled_at, last_seen_at, status, fingerprint_locked_at, warranty_voided_at, tags FROM devices WHERE tenant_id = ? ORDER BY enrolled_at`,
 		tenantID,
 	)
 	if err != nil {
@@ -246,7 +251,7 @@ func listDevicesByTenant(db *DB, tenantID string) ([]Device, error) {
 	for rows.Next() {
 		var d Device
 		var rawTags string
-		if err := rows.Scan(&d.ID, &d.TenantID, &d.Hostname, &d.EnrolledAt, &d.LastSeenAt, &d.Status, &d.FingerprintLockedAt, &rawTags); err != nil {
+		if err := rows.Scan(&d.ID, &d.TenantID, &d.Hostname, &d.EnrolledAt, &d.LastSeenAt, &d.Status, &d.FingerprintLockedAt, &d.WarrantyVoidedAt, &rawTags); err != nil {
 			return nil, err
 		}
 		d.Tags = splitTags(rawTags)
