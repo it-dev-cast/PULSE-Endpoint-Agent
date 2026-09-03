@@ -756,28 +756,43 @@ func handleResetFingerprint(db *DB, hub *liveHub) http.HandlerFunc {
 			return
 		}
 
-		if err := resetDeviceFingerprint(db, device.ID); err != nil {
-			log.Printf("reset-fingerprint: resetDeviceFingerprint failed for %s: %v", device.ID, err)
+		if err := performFingerprintReset(db, hub, device, time.Now()); err != nil {
+			log.Printf("reset-fingerprint: performFingerprintReset failed for %s: %v", device.ID, err)
 			writeError(w, http.StatusInternalServerError, "failed to reset fingerprint")
 			return
 		}
 
-		now := time.Now()
-		if eventID, err := newID("event"); err == nil {
-			msg := fmt.Sprintf("Hardware fingerprint baseline reset for device %s (%s) - a legitimate hardware change is expected; the next hardware check will capture a fresh baseline.", device.ID, device.Hostname)
-			if err := insertEvent(db, eventID, device.TenantID, device.ID, "hardware-fingerprint-reset", msg, "warning", now); err != nil {
-				log.Printf("reset-fingerprint: failed to log hardware-fingerprint-reset event: %v", err)
-			} else {
-				hub.publishEvent(device.TenantID, Event{
-					ID: eventID, TenantID: device.TenantID, DeviceID: device.ID,
-					EventType: "hardware-fingerprint-reset", Message: msg, Severity: "warning",
-					CreatedAt: now.UTC().Format(time.RFC3339Nano),
-				})
-			}
-		}
-
 		writeJSON(w, http.StatusOK, map[string]string{"deviceId": device.ID, "status": "reset"})
 	}
+}
+
+// performFingerprintReset is the one real place that clears a device's hardware baseline AND
+// records the real hardware-fingerprint-reset event - shared by handleResetFingerprint (an
+// operator using "Reset FP" directly for a legitimate hardware upgrade) and handleWarrantyReview's
+// "dismiss" decision (the identical real effect, reached via a different entry point). Found
+// live, not guessed: dismiss originally fired its own differently-named event, which correctly
+// updated the backend's own fingerprint_locked_at-based derivation but left the dashboard's
+// client-side isDeviceCurrentlyTampered (which keys off the literal "hardware-fingerprint-reset"
+// event type, not the device row) still reading the device as tampered - the two derivations
+// silently disagreed. Sharing this one function is what keeps every consumer of "was this
+// baseline actually reset" looking at the same real event, not two names for the same fact.
+func performFingerprintReset(db *DB, hub *liveHub, device *Device, now time.Time) error {
+	if err := resetDeviceFingerprint(db, device.ID); err != nil {
+		return err
+	}
+	if eventID, err := newID("event"); err == nil {
+		msg := fmt.Sprintf("Hardware fingerprint baseline reset for device %s (%s) - a legitimate hardware change is expected; the next hardware check will capture a fresh baseline.", device.ID, device.Hostname)
+		if err := insertEvent(db, eventID, device.TenantID, device.ID, "hardware-fingerprint-reset", msg, "warning", now); err != nil {
+			log.Printf("reset-fingerprint: failed to log hardware-fingerprint-reset event: %v", err)
+		} else {
+			hub.publishEvent(device.TenantID, Event{
+				ID: eventID, TenantID: device.TenantID, DeviceID: device.ID,
+				EventType: "hardware-fingerprint-reset", Message: msg, Severity: "warning",
+				CreatedAt: now.UTC().Format(time.RFC3339Nano),
+			})
+		}
+	}
+	return nil
 }
 
 type warrantyReviewRequest struct {
@@ -859,16 +874,16 @@ func handleWarrantyReview(db *DB, hub *liveHub) http.HandlerFunc {
 			writeJSON(w, http.StatusOK, map[string]string{"deviceId": device.ID, "warrantyState": warrantyStateVoided})
 
 		case "dismiss":
-			if err := resetDeviceFingerprint(db, device.ID); err != nil {
-				log.Printf("warranty-review: resetDeviceFingerprint failed for %s: %v", device.ID, err)
+			// The exact same real effect and event as handleResetFingerprint's own "Reset FP" -
+			// not a second, differently-named event for the same fact (see
+			// performFingerprintReset's own comment on why that divergence is a real bug, found
+			// live: the dashboard's own tamper check keys off this literal event type, not
+			// fingerprint_locked_at).
+			if err := performFingerprintReset(db, hub, device, now); err != nil {
+				log.Printf("warranty-review: performFingerprintReset failed for %s: %v", device.ID, err)
 				writeError(w, http.StatusInternalServerError, "failed to dismiss review")
 				return
 			}
-			msg := fmt.Sprintf(
-				"Warranty review dismissed for device %s (%s) - the flagged event was reviewed and judged a false positive; hardware baseline reset, next hardware-check captures a fresh one.",
-				device.ID, device.Hostname,
-			)
-			fireWarrantyReviewEvent(db, hub, device, "warranty-review-dismissed", msg, "info", now)
 			writeJSON(w, http.StatusOK, map[string]string{"deviceId": device.ID, "status": "dismissed"})
 
 		default:
