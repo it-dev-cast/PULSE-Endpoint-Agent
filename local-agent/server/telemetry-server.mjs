@@ -2843,6 +2843,22 @@ function extractLiveStatusFields(data) {
   if (worstDisk && typeof worstDisk.disk.FreeSpace === "number") {
     putDetail(detail, "diskFreeGB", Math.round((worstDisk.disk.FreeSpace / (1024 ** 3)) * 10) / 10);
   }
+  // Full per-volume breakdown - data.logicalDisks already covers every local fixed volume
+  // (Win32_LogicalDisk -Filter "DriveType=3", not just C:), just never surfaced beyond the
+  // single worst-disk tile above. Sent as its own real array (never collapsed to null when
+  // empty) - same "an empty array is itself a meaningful signal" convention as avProductNames.
+  putDetail(
+    detail,
+    "volumes",
+    disks
+      .filter((d) => typeof d?.Size === "number" && d.Size > 0 && strOrNull(d.DeviceID))
+      .map((d) => ({
+        letter: strOrNull(d.DeviceID),
+        label: strOrNull(d.VolumeName),
+        sizeGB: Math.round((d.Size / (1024 ** 3)) * 10) / 10,
+        freeGB: typeof d.FreeSpace === "number" ? Math.round((d.FreeSpace / (1024 ** 3)) * 10) / 10 : null,
+      })),
+  );
   const sec = securityFromTelemetry(data);
   putDetail(detail, "tpmActive", sec.tpmActive);
   putDetail(detail, "secureBootEnabled", sec.secureBootEnabled);
