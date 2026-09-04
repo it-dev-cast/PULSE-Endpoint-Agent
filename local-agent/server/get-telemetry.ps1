@@ -129,6 +129,35 @@ try {
     $avProducts = @()
 }
 
+# SoftwareLicensingProduct, filtered to Windows itself (ApplicationID is the well-known,
+# Microsoft-documented GUID for the Windows OS product - excludes Office/other products that
+# also register in this same WMI class). Confirmed live on this real machine: this filter alone
+# still returns 61 rows - almost all decoy placeholder SKUs (every edition/channel combination
+# the licensing service merely knows about, LicenseStatus=0, blank PartialProductKey) representing
+# nothing actually installed. Only ONE row is real, and PartialProductKey (non-empty only on that
+# real row) is the reliable way to find it - the same signal slmgr.vbs /dli itself uses
+# internally, not invented for this task. Falls back to any row with LicenseStatus -ne 0 if none
+# has a key - unverified on this machine (it IS licensed), a reasonable but untested guess for a
+# genuinely unlicensed/grace-period device. LicenseStatus itself (unlike SecurityCenter2's
+# undocumented productState) is a small, Microsoft-documented enum - decoded downstream, not here.
+$windowsLicense = $null
+try {
+    $licenseProducts = Get-CimInstance SoftwareLicensingProduct -Filter "ApplicationID='55c92734-d682-4d71-983e-d6ec3f16059f'" -ErrorAction Stop
+    $realLicense = $licenseProducts | Where-Object { $_.PartialProductKey } | Select-Object -First 1
+    if (-not $realLicense) {
+        $realLicense = $licenseProducts | Where-Object { $_.LicenseStatus -ne 0 } | Select-Object -First 1
+    }
+    if ($realLicense) {
+        $windowsLicense = [ordered]@{
+            licenseStatus     = [int]$realLicense.LicenseStatus
+            licenseFamily     = $realLicense.LicenseFamily
+            productKeyChannel = $realLicense.ProductKeyChannel
+        }
+    }
+} catch {
+    $windowsLicense = $null
+}
+
 # Get-ComputerInfo also exposes BiosFirmwareType, but it gathers a large amount of unrelated
 # system info (hotfix lists, etc.) and is known to take several seconds - too slow for a poller
 # on a 5s interval with a 15s timeout. $env:firmware_type is the same underlying data (set by
@@ -476,6 +505,7 @@ $result = [ordered]@{
     bitlockerStatus       = $bitlockerStatus
     defenderStatus        = $defenderStatus
     avProducts            = @($avProducts)
+    windowsLicense        = $windowsLicense
     bootMode              = $bootMode
     localIp               = $localIp
     driverVersions        = $driverVersions

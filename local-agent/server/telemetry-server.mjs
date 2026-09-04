@@ -2920,6 +2920,16 @@ function extractLiveStatusFields(data) {
     "avProductNames",
     Array.isArray(data?.avProducts) ? data.avProducts.map((p) => strOrNull(p?.displayName)).filter(Boolean) : null,
   );
+  // Real Windows license/activation status - get-telemetry.ps1 has already done the hard part
+  // (isolating the one real SoftwareLicensingProduct row among ~60 decoy placeholder SKUs via
+  // PartialProductKey - see its own comment). licenseStatus is sent as the raw integer, not
+  // decoded here - it's a small, Microsoft-documented enum (0=Unlicensed, 1=Licensed, 2=OOBGrace,
+  // 3=OOTGrace, 4=NonGenuineGrace, 5=Notification, 6=ExtendedGrace), decoded client-side same as
+  // the NVMe critical_warning bitmask - raw source fact from the agent, display logic in the
+  // dashboard.
+  putDetail(detail, "windowsLicenseStatus", numOrNull(data?.windowsLicense?.licenseStatus));
+  putDetail(detail, "windowsLicenseFamily", strOrNull(data?.windowsLicense?.licenseFamily));
+  putDetail(detail, "windowsLicenseChannel", strOrNull(data?.windowsLicense?.productKeyChannel));
 
   return { cpuPct, ramPct, diskPct, batteryPct, detail: Object.keys(detail).length > 0 ? detail : undefined };
 }
