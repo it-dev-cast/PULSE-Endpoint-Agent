@@ -257,6 +257,23 @@ let lastWindowsUpdateCheckAt = 0;
 // no real search has ever completed yet, same honest-Unknown convention as windowsUpdateState.
 let biosFirmwareUpdateState = null;
 
+// { azureAdJoined, domainJoined, enterpriseJoined, workplaceJoined: boolean, mdmEnrolled:
+// boolean, tenantName: string | null, checkedAt: string } | null - real `dsregcmd /status`
+// output (Microsoft's own authoritative domain-join/Azure AD-join/MDM-enrollment tool - there is
+// no registry/WMI shortcut this app should prefer over asking the OS the same question `dsregcmd`
+// itself answers), parsed off the SAME WINDOWS_UPDATE_CHECK_INTERVAL_MS hourly cadence as
+// windowsUpdateState/biosFirmwareUpdateState above (dsregcmd is cheap/local/no-network, but this
+// isn't a signal that needs sub-hourly freshness, so reusing the existing shared timer instead of
+// inventing a new one keeps this consistent with the other two). mdmEnrolled is derived from a
+// real MDM management URL being present - confirmed live on this machine (Workplace/Azure-AD-
+// registered, not device-joined) that WorkplaceMdmUrl is genuinely blank when not MDM-enrolled.
+// The device-level equivalent (an AzureAdJoined machine's own top-level MdmUrl field) is handled
+// the same way but is UNVERIFIED on this specific machine, since it isn't joined that way - it's
+// well-documented, stable dsregcmd behavior, not a guess, but disclosed here rather than silently
+// assumed. null means no real check has ever completed yet, same honest-Unknown convention as
+// windowsUpdateState/biosFirmwareUpdateState.
+let domainMdmState = null;
+
 // { battery: MetricPrediction, ssd: MetricPrediction } | null - ai-service's real regression
 // result, updated by runBackendCycle at most once per real calendar day (see
 // METRIC_SNAPSHOT_STATE_PATH). null means no real prediction has ever completed (not enrolled,
@@ -1376,6 +1393,76 @@ async function runBiosFirmwareUpdateCheck() {
     };
   } catch (e) {
     console.error("[telemetry] BIOS firmware update check produced unparseable output:", e.message, "raw:", stdout);
+    return null;
+  }
+}
+
+// Real `dsregcmd /status` output, regex-parsed - there is no JSON output mode, so this reads the
+// same colon-separated text table a human would (confirmed directly against a real run on this
+// machine: "AzureAdJoined : NO", "WorkplaceJoined : YES", "WorkplaceTenantName : Casterly Private
+// Limited", "WorkplaceMdmUrl : " (blank = not MDM-enrolled)). Get-Field anchors each match to the
+// start of the line (after whitespace) so e.g. "WorkplaceMdmUrl" can never falsely match a lookup
+// for bare "MdmUrl" - the two are genuinely different fields (device-level vs. work-account-level
+// MDM enrollment), and this app has no basis to claim one when it only has evidence of the other.
+const DSREGCMD_STATUS_SCRIPT = `
+try {
+    $lines = & dsregcmd /status 2>&1
+    function Get-Field($name) {
+        $line = $lines | Where-Object { $_ -match "^\\s*$name\\s*:" } | Select-Object -First 1
+        if ($line -and $line -match ':\\s*(.*)$') { return $matches[1].Trim() }
+        return $null
+    }
+    $azureAdJoined = (Get-Field 'AzureAdJoined') -eq "YES"
+    $domainJoined = (Get-Field 'DomainJoined') -eq "YES"
+    $enterpriseJoined = (Get-Field 'EnterpriseJoined') -eq "YES"
+    $workplaceJoined = (Get-Field 'WorkplaceJoined') -eq "YES"
+    $deviceMdmUrl = Get-Field 'MdmUrl'
+    $workplaceMdmUrl = Get-Field 'WorkplaceMdmUrl'
+    $mdmUrl = if (-not [string]::IsNullOrWhiteSpace($deviceMdmUrl)) { $deviceMdmUrl } elseif (-not [string]::IsNullOrWhiteSpace($workplaceMdmUrl)) { $workplaceMdmUrl } else { $null }
+    $deviceTenantName = Get-Field 'TenantName'
+    $workplaceTenantName = Get-Field 'WorkplaceTenantName'
+    $tenantName = if (-not [string]::IsNullOrWhiteSpace($deviceTenantName)) { $deviceTenantName } elseif (-not [string]::IsNullOrWhiteSpace($workplaceTenantName)) { $workplaceTenantName } else { $null }
+    [PSCustomObject]@{
+        ok = $true
+        azureAdJoined = $azureAdJoined
+        domainJoined = $domainJoined
+        enterpriseJoined = $enterpriseJoined
+        workplaceJoined = $workplaceJoined
+        mdmEnrolled = -not [string]::IsNullOrWhiteSpace($mdmUrl)
+        tenantName = $tenantName
+    } | ConvertTo-Json -Compress
+} catch {
+    [PSCustomObject]@{ ok = $false; error = $_.Exception.Message } | ConvertTo-Json -Compress
+}
+`;
+
+// dsregcmd is a fast local-only call (no network, no WUA) - confirmed directly on this machine at
+// well under a second - so 20s is generous headroom, not a measured worst case like the WUA
+// searches above.
+async function runDomainMdmCheck() {
+  const { err, stdout, stderr } = await execPowerShellCommand(DSREGCMD_STATUS_SCRIPT, 20000);
+  if (err) {
+    console.error("[telemetry] domain/MDM status check failed to run:", err.message);
+    if (stderr) console.error("[telemetry]   stderr:", stderr.toString());
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(stdout);
+    if (!parsed.ok) {
+      console.error("[telemetry] domain/MDM status check completed but reported failure:", parsed.error);
+      return null;
+    }
+    return {
+      azureAdJoined: !!parsed.azureAdJoined,
+      domainJoined: !!parsed.domainJoined,
+      enterpriseJoined: !!parsed.enterpriseJoined,
+      workplaceJoined: !!parsed.workplaceJoined,
+      mdmEnrolled: !!parsed.mdmEnrolled,
+      tenantName: parsed.tenantName || null,
+      checkedAt: new Date().toISOString(),
+    };
+  } catch (e) {
+    console.error("[telemetry] domain/MDM status check produced unparseable output:", e.message, "raw:", stdout);
     return null;
   }
 }
@@ -2698,6 +2785,21 @@ function extractLiveStatusFields(data) {
   putDetail(detail, "biosFirmwareUpdateAvailable", typeof data?.biosFirmwareUpdate?.updateAvailable === "boolean" ? data.biosFirmwareUpdate.updateAvailable : null);
   putDetail(detail, "biosFirmwareLatestVersion", strOrNull(data?.biosFirmwareUpdate?.latestVersion));
   putDetail(detail, "biosFirmwareCheckedAt", strOrNull(data?.biosFirmwareUpdate?.checkedAt));
+  // Real domain-join/Azure AD-join/MDM-enrollment status (runDomainMdmCheck, dsregcmd /status),
+  // same hourly cadence as Windows Update/BIOS above, same passthrough reasoning - already
+  // computed locally, just not previously sent to the Cloud Command Center. All five booleans are
+  // sent as their own real source facts (not collapsed into one derived "managed" flag) since a
+  // device can genuinely be joined one way but not another (e.g. this real machine: Workplace
+  // Joined=YES but AzureAdJoined/DomainJoined=NO) and the dashboard's own Security card is the
+  // right place to show that distinction, not this passthrough layer. checkedAt follows the same
+  // "not checked yet" honesty as windowsUpdateCheckedAt/biosFirmwareCheckedAt.
+  putDetail(detail, "azureAdJoined", typeof data?.domainMdm?.azureAdJoined === "boolean" ? data.domainMdm.azureAdJoined : null);
+  putDetail(detail, "domainJoined", typeof data?.domainMdm?.domainJoined === "boolean" ? data.domainMdm.domainJoined : null);
+  putDetail(detail, "enterpriseJoined", typeof data?.domainMdm?.enterpriseJoined === "boolean" ? data.domainMdm.enterpriseJoined : null);
+  putDetail(detail, "workplaceJoined", typeof data?.domainMdm?.workplaceJoined === "boolean" ? data.domainMdm.workplaceJoined : null);
+  putDetail(detail, "mdmEnrolled", typeof data?.domainMdm?.mdmEnrolled === "boolean" ? data.domainMdm.mdmEnrolled : null);
+  putDetail(detail, "domainMdmTenantName", strOrNull(data?.domainMdm?.tenantName));
+  putDetail(detail, "domainMdmCheckedAt", strOrNull(data?.domainMdm?.checkedAt));
 
   return { cpuPct, ramPct, diskPct, batteryPct, detail: Object.keys(detail).length > 0 ? detail : undefined };
 }
@@ -3065,18 +3167,21 @@ async function runBackendCycle() {
     }
   }
 
-  // Real Windows Update checks (software updates + BIOS/system firmware updates), on their own
-  // slower WINDOWS_UPDATE_CHECK_INTERVAL_MS cadence (see that constant's and
-  // runWindowsUpdateCheck's/runBiosFirmwareUpdateCheck's own comments for why). Unlike the
-  // hardware-check/snapshot/prediction blocks above, this is NOT gated on `entitlement` - whether
-  // this real machine has pending updates is a pure local OS fact, unrelated to Cloud Command
-  // Center enrollment. Run together (Promise.all) since both are independent, similarly slow WUA
-  // searches on the exact same cadence - no reason to serialize them one after the other.
+  // Real Windows Update checks (software updates + BIOS/system firmware updates + domain-join/
+  // MDM status), on their own slower WINDOWS_UPDATE_CHECK_INTERVAL_MS cadence (see that constant's
+  // and runWindowsUpdateCheck's/runBiosFirmwareUpdateCheck's/runDomainMdmCheck's own comments for
+  // why). Unlike the hardware-check/snapshot/prediction blocks above, this is NOT gated on
+  // `entitlement` - whether this real machine has pending updates or is domain/MDM-managed is a
+  // pure local OS fact, unrelated to Cloud Command Center enrollment. Run together (Promise.all)
+  // on the same shared timer - runDomainMdmCheck is cheap/local (dsregcmd, no network) unlike the
+  // other two's WUA searches, but there's no freshness reason for it to run more often, so it
+  // piggybacks on the existing cadence rather than inventing a second timer for one fast check.
   if (Date.now() - lastWindowsUpdateCheckAt >= WINDOWS_UPDATE_CHECK_INTERVAL_MS) {
     lastWindowsUpdateCheckAt = Date.now();
-    const [softwareResult, biosResult] = await Promise.all([
+    const [softwareResult, biosResult, domainMdmResult] = await Promise.all([
       withTimeout(runWindowsUpdateCheck(), WINDOWS_UPDATE_CHECK_TIMEOUT_MS, "Windows Update check"),
       withTimeout(runBiosFirmwareUpdateCheck(), WINDOWS_UPDATE_CHECK_TIMEOUT_MS, "BIOS firmware update check"),
+      withTimeout(runDomainMdmCheck(), WINDOWS_UPDATE_CHECK_TIMEOUT_MS, "domain/MDM status check"),
     ]);
     if (softwareResult) {
       windowsUpdateState = softwareResult;
@@ -3085,6 +3190,10 @@ async function runBackendCycle() {
     if (biosResult) {
       biosFirmwareUpdateState = biosResult;
       console.log(`[telemetry] BIOS firmware update check: ${biosResult.updateAvailable ? `update available (v${biosResult.latestVersion})` : "up to date"}`);
+    }
+    if (domainMdmResult) {
+      domainMdmState = domainMdmResult;
+      console.log(`[telemetry] domain/MDM status check: azureAdJoined=${domainMdmResult.azureAdJoined} domainJoined=${domainMdmResult.domainJoined} workplaceJoined=${domainMdmResult.workplaceJoined} mdmEnrolled=${domainMdmResult.mdmEnrolled}`);
     }
   }
 }
@@ -3533,6 +3642,7 @@ async function collect() {
     parsed.predictions = predictionState;
     parsed.windowsUpdate = windowsUpdateState;
     parsed.biosFirmwareUpdate = biosFirmwareUpdateState;
+    parsed.domainMdm = domainMdmState;
     cache = { data: parsed, error: null, updatedAt: new Date().toISOString() };
 
     // Fire-and-forget (not awaited) - see postLiveStatus's own comment on why this must never
