@@ -2568,6 +2568,21 @@ function resolveEntitlementState(deviceCredentials, entitlement) {
 // null if this cycle's telemetry doesn't yet have the fields needed (e.g. very first poll still
 // in flight) - the caller skips sending a check that cycle rather than posting a garbage/partial
 // fingerprint that could get locked in as a bogus baseline.
+
+// Picks the WiFi adapter by name pattern, never by array position - same precedent as
+// extractLiveStatusFields' own firstGpu selection. Necessary, not just cautious: mergeRustData
+// unconditionally replaces telemetry.network with rust's own raw adapter list whenever rust
+// succeeds that cycle (confirmed live: rust's list puts "Tailscale Tunnel" first, with no
+// Wi-Fi-priority sort and no virtual-adapter filtering - both of which only get-telemetry.ps1's
+// own Win32_NetworkAdapter query applies). Reading network[0] positionally would grab the wrong
+// adapter's MAC on most real cycles.
+const WIFI_ADAPTER_NAME = /wi-?fi|wireless/i;
+function findWifiMac(telemetry) {
+  const nets = Array.isArray(telemetry?.network) ? telemetry.network : [];
+  const wifi = nets.find((n) => n?.Name && WIFI_ADAPTER_NAME.test(n.Name));
+  return wifi?.MACAddress ?? "";
+}
+
 function computeHardwareFingerprint(telemetry) {
   if (!telemetry?.system || !telemetry?.board || !telemetry?.cpu || !telemetry?.memory || !Array.isArray(telemetry?.storage) || !Array.isArray(telemetry?.gpu)) {
     return null;
@@ -2587,6 +2602,14 @@ function computeHardwareFingerprint(telemetry) {
       sizeBytes: Number(s.Size) || 0,
     })),
     gpuModels: telemetry.gpu.map((g) => g.Name ?? ""),
+    // Added after both real devices already had locked baselines - backend's compareFingerprints
+    // (checkIfBothPresent) only ever compares these once a baseline holds a real, non-empty value
+    // for them, so an old baseline captured before this shipped can never read as "changed" just
+    // because it's missing a field it never had. batterySerial is genuinely blank on this dev
+    // machine (confirmed: Win32_PortableBattery.SerialNumber unpopulated by this OEM) - sent as
+    // "" honestly, same as every other genuinely-absent field here, not fabricated.
+    wifiMac: findWifiMac(telemetry),
+    batterySerial: telemetry.batteryDetail?.portable?.SerialNumber ?? "",
   };
 }
 

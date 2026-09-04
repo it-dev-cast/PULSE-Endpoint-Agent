@@ -34,6 +34,11 @@ type HardwareFingerprint struct {
 	RAMModuleSerials []string             `json:"ramModuleSerials"`
 	Storage          []StorageFingerprint `json:"storage"`
 	GPUModels        []string             `json:"gpuModels"`
+	// WifiMac/BatterySerial were added after both real devices already had locked baselines - see
+	// compareFingerprints' checkIfBothPresent for why they're compared differently from the 9
+	// fields above.
+	WifiMac       string `json:"wifiMac"`
+	BatterySerial string `json:"batterySerial"`
 }
 
 // normalize sorts every slice field whose real-world enumeration order isn't guaranteed stable
@@ -76,6 +81,25 @@ func compareFingerprints(baseline, current HardwareFingerprint) (fields []string
 		}
 	}
 
+	// checkIfBothPresent is check's counterpart for WifiMac/BatterySerial, added to
+	// HardwareFingerprint after both real devices already had locked baselines. An old baseline
+	// unmarshals a field it never had as Go's zero value ("") - unconditionally comparing that
+	// against a freshly-collected real value would read as "changed" for every already-enrolled
+	// device the moment this ships, not a genuine hardware change. Skipping whenever either side
+	// is empty defers enforcement to this device's next fresh baseline lock (re-enrollment, or an
+	// explicit fingerprint reset) - no schema-version bookkeeping needed. The same rule also
+	// correctly no-ops on hardware that genuinely never reports a field (confirmed live: this dev
+	// machine's own battery serial is blank via Win32_PortableBattery) rather than treating
+	// "unknown" as "known and different." The 9 fields above intentionally keep using check()
+	// unmodified - they've been part of every baseline since this feature's first version, so an
+	// empty value there is a real fact worth comparing, not a migration gap.
+	checkIfBothPresent := func(label, oldVal, newVal string) {
+		if oldVal == "" || newVal == "" {
+			return
+		}
+		check(label, oldVal, newVal)
+	}
+
 	check("System Serial Number", baseline.SystemSerial, current.SystemSerial)
 	check("System UUID", baseline.SystemUUID, current.SystemUUID)
 	check("Motherboard Product", baseline.BoardProduct, current.BoardProduct)
@@ -85,6 +109,8 @@ func compareFingerprints(baseline, current HardwareFingerprint) (fields []string
 	check("RAM Module Serials", strings.Join(baseline.RAMModuleSerials, ", "), strings.Join(current.RAMModuleSerials, ", "))
 	check("Storage Devices", storageLabel(baseline.Storage), storageLabel(current.Storage))
 	check("GPU Models", strings.Join(baseline.GPUModels, ", "), strings.Join(current.GPUModels, ", "))
+	checkIfBothPresent("WiFi MAC Address", baseline.WifiMac, current.WifiMac)
+	checkIfBothPresent("Battery Serial Number", baseline.BatterySerial, current.BatterySerial)
 
 	return fields, details
 }

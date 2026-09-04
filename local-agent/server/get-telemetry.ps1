@@ -131,6 +131,19 @@ try {
     $batteryCycle = $null
 }
 
+# Win32_PortableBattery.SerialNumber - PRD §6.1 hardware fingerprint extension. Confirmed live on
+# this dev machine that the class itself exists and returns real Chemistry/DesignVoltage/
+# Manufacturer values, but SerialNumber comes back blank - a real, known OEM gap (many vendors
+# never populate this ACPI field), not a query failure, so this is collected generically for
+# hardware where it IS populated rather than skipped as pointless here.
+$batteryPortable = $null
+try {
+    $batteryPortable = Get-CimInstance Win32_PortableBattery -ErrorAction Stop |
+        Select-Object SerialNumber
+} catch {
+    $batteryPortable = $null
+}
+
 # powercfg /batteryreport - a second, independent route to design/full-charge capacity for
 # when root/wmi's BatteryStaticData class isn't present on this OEM (it's absent on this dev
 # machine). The report is an HTML file; capacities appear as "XX,XXX mWh" next to their row
@@ -406,6 +419,7 @@ $result = [ordered]@{
         static     = $batteryStatic
         fullCharge = $batteryFullCharge
         cycle      = $batteryCycle
+        portable   = $batteryPortable
     }
     storageHealth = $storageHealth
     gpuUtilization = $gpuUtil
