@@ -2751,6 +2751,15 @@ function extractLiveStatusFields(data) {
   putDetail(detail, "gpuUtilPct", numOrNull(data?.gpuUtilization));
   putDetail(detail, "gpuTempC", numOrNull(data?.hardwareMonitor?.gpuTempC));
   putDetail(detail, "batteryHealthPct", batteryHealthFromTelemetry(data));
+  // batteryCycleCount reflects only rust's own corroborated reading (see the merge logic in
+  // collect() that overwrites ps.batteryDetail.cycle.CycleCount from rust's verdict, not
+  // root/wmi's raw BatteryCycleCount) - null here means genuinely unsupported/unverifiable on
+  // this hardware, not a real zero. batteryTemperatureC is deliberately NOT sent at all: confirmed
+  // absent on this real machine via two independent sources (LibreHardwareMonitor's own sensor
+  // enumeration and rust's separate Windows Battery API read) - a genuine hardware ceiling, same
+  // category as this project's known fan-RPM gap, not worth wiring a field that can never be real
+  // here (though another device's EC might expose it - revisit if that's ever confirmed live).
+  putDetail(detail, "batteryCycleCount", numOrNull(data?.batteryDetail?.cycle?.CycleCount));
   putDetail(detail, "storageWearPct", numOrNull(data?.storageHealth?.nvme_smart_health_information_log?.percentage_used));
   // Real NVMe media-error/critical-warning signals - already sitting in data.storageHealth (the
   // full smartctl JSON get-telemetry.ps1 already collects for storageWearPct above), just not
@@ -3463,6 +3472,19 @@ function mergeRustData(ps, rust) {
         batteryTemperatureC: ps.hardwareMonitor?.batteryTemperatureC ?? rb.temperatureC,
       };
     }
+
+    // batteryDetail.cycle.CycleCount deliberately does NOT follow the "rust when present, else
+    // PS" pattern above - it always takes rust's own verdict (present or null), overwriting
+    // whatever root/wmi's BatteryCycleCount produced, never falling back to a WMI-only number.
+    // Cross-validated live on this real machine: root/wmi's CycleCount returned "0" with no error
+    // (Active: true) for a battery already at 44% of design capacity per rust's own
+    // energyFullWh/energyFullDesignWh calc - a genuinely 0-cycle battery would not be that
+    // degraded - while rust's own independent read of the same physical battery (a different
+    // Windows API, not WMI) returned null, i.e. genuinely unsupported by this EC. That
+    // corroboration gap is the real signal: root/wmi's "0" here is very likely an unpopulated-
+    // firmware default, not a true reading, so this only ever surfaces a cycle count when rust's
+    // own reading corroborates the concept is actually supported on this hardware.
+    ps.batteryDetail.cycle = { ...(ps.batteryDetail.cycle ?? {}), CycleCount: rb.cycleCount };
   }
 
   // storageHealth: additive OVERLAY, not a full-object replace - unlike cpu/memory/tpm above,
