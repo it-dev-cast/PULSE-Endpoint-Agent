@@ -2780,6 +2780,13 @@ function extractLiveStatusFields(data) {
   putDetail(detail, "model", strOrNull(data?.system?.Name));
   putDetail(detail, "serial", strOrNull(data?.bios?.SerialNumber) ?? strOrNull(data?.system?.IdentifyingNumber));
   putDetail(detail, "osCaption", strOrNull(data?.osDetail?.Caption));
+  // Real last-boot timestamp - get-telemetry.ps1 has computed osDetail.LastBootUpTime (and a
+  // pre-formatted UptimeFormatted string) since this project's first commit, just never read
+  // downstream. Sending the raw timestamp only, not UptimeFormatted - a PS-side "Xd Yh Zm" string
+  // is a snapshot at collection time that only gets staler the longer this cached row sits
+  // between polls, whereas the dashboard's own timeAgo() (already used elsewhere on Device 360)
+  // computes "X ago" fresh on every render from this one real fact.
+  putDetail(detail, "lastBootTime", parseWcfDate(data?.osDetail?.LastBootUpTime));
   putDetail(detail, "cpuName", strOrNull(data?.cpu?.Name));
   putDetail(detail, "cpuTempC", numOrNull(data?.hardwareMonitor?.cpuTempC));
   const gpuSkip = /microsoft basic display|remote display|virtual display|idd driver|parsec|spacedesk|usb display|mirage driver|indirect display/i;
