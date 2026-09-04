@@ -29,6 +29,19 @@ $battery = Get-CimInstance Win32_Battery |
 $batteryRunTimeRaw = (Get-CimInstance Win32_Battery | Select-Object -First 1 EstimatedRunTime).EstimatedRunTime
 $batteryRunTimeMinutes = if ($null -ne $batteryRunTimeRaw -and $batteryRunTimeRaw -ne 71582788) { $batteryRunTimeRaw } else { $null }
 
+# Win32_PhysicalMemoryArray.MemoryDevices - the TOTAL physical RAM slot count on the
+# motherboard, including empty ones (Win32_PhysicalMemory above only reports INSTALLED modules,
+# used for ramModuleSerials in the hardware fingerprint) - genuinely new collection, not queried
+# anywhere else in this project. Summed across all returned instances - real hardware normally
+# has exactly one physical memory array (confirmed on this dev machine), but a server/workstation
+# with multiple would have more than one, and each contributes real slots.
+$memoryTotalSlots = $null
+try {
+    $memoryTotalSlots = (Get-CimInstance Win32_PhysicalMemoryArray -ErrorAction Stop | Measure-Object -Property MemoryDevices -Sum).Sum
+} catch {
+    $memoryTotalSlots = $null
+}
+
 $gpu = Get-CimInstance Win32_VideoController |
     Select-Object Name, AdapterRAM, DriverVersion, AdapterCompatibility, DriverDate
 
@@ -432,9 +445,10 @@ $result = [ordered]@{
     bios      = $bios
     cpu       = $cpuInfo
     memory    = [ordered]@{
-        modules  = @($memModules)
-        freeKB   = $os.FreePhysicalMemory
-        totalKB  = $os.TotalVisibleMemorySize
+        modules    = @($memModules)
+        freeKB     = $os.FreePhysicalMemory
+        totalKB    = $os.TotalVisibleMemorySize
+        totalSlots = $memoryTotalSlots
     }
     storage   = @($disks)
     battery   = @($battery)

@@ -2832,6 +2832,14 @@ function extractLiveStatusFields(data) {
   if (typeof totalKB === "number" && totalKB > 0) {
     putDetail(detail, "memTotalGB", Math.round((totalKB / (1024 * 1024)) * 10) / 10);
   }
+  // ramSlotsUsed is a free derivation from data.memory.modules (already collected for the
+  // hardware fingerprint's ramModuleSerials) - its array length is the real installed-module
+  // count, nothing new to gather. ramSlotsTotal is genuinely new (Win32_PhysicalMemoryArray -
+  // see get-telemetry.ps1's own comment) - the TOTAL slot count including empty ones, which
+  // modules.length alone can never reveal. Both null (not 0) when data.memory.modules isn't a
+  // real array this cycle - a query failure honestly reads as unknown, not "zero RAM installed".
+  putDetail(detail, "ramSlotsUsed", Array.isArray(data?.memory?.modules) ? data.memory.modules.length : null);
+  putDetail(detail, "ramSlotsTotal", numOrNull(data?.memory?.totalSlots));
   if (worstDisk && typeof worstDisk.disk.FreeSpace === "number") {
     putDetail(detail, "diskFreeGB", Math.round((worstDisk.disk.FreeSpace / (1024 ** 3)) * 10) / 10);
   }
