@@ -2752,6 +2752,20 @@ function extractLiveStatusFields(data) {
   putDetail(detail, "gpuTempC", numOrNull(data?.hardwareMonitor?.gpuTempC));
   putDetail(detail, "batteryHealthPct", batteryHealthFromTelemetry(data));
   putDetail(detail, "storageWearPct", numOrNull(data?.storageHealth?.nvme_smart_health_information_log?.percentage_used));
+  // Real NVMe media-error/critical-warning signals - already sitting in data.storageHealth (the
+  // full smartctl JSON get-telemetry.ps1 already collects for storageWearPct above), just not
+  // previously read. NVMe has no ATA-style attribute table (no Reallocated_Sector_Ct/
+  // Offline_Uncorrectable concept) - confirmed directly against a real `smartctl -a -j -d nvme`
+  // run on this machine's own drive that no such fields exist anywhere in the output, not just
+  // unparsed - so there's no "reallocated sectors" field to send, honestly. media_errors is
+  // NVMe's own real, direct analog: the spec-defined lifetime count of unrecovered data-integrity
+  // errors, sent as-is. critical_warning is the raw 5-bit NVMe health bitmask (spare capacity/
+  // temperature/reliability/read-only-mode/backup-device-failure flags, NVMe Base Spec 1.4) -
+  // sent as the raw integer, not decoded here, so the dashboard's display layer owns turning it
+  // into human-readable status text (same "send the raw source fact, not a derived value"
+  // convention as biosFirmwareUpdateAvailable above).
+  putDetail(detail, "storageMediaErrors", numOrNull(data?.storageHealth?.nvme_smart_health_information_log?.media_errors));
+  putDetail(detail, "storageCriticalWarning", numOrNull(data?.storageHealth?.nvme_smart_health_information_log?.critical_warning));
   const driveModels = (Array.isArray(data?.storage) ? data.storage : []).map((d) => strOrNull(d?.Model)).filter(Boolean);
   putDetail(detail, "driveModel", driveModels.length > 0 ? driveModels.join(" · ") : null);
   if (typeof totalKB === "number" && totalKB > 0) {
