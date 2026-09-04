@@ -85,6 +85,37 @@ try {
     $bitlockerStatus = $null
 }
 
+# MSFT_MpComputerStatus - Windows Defender's own native status API, confirmed live on this
+# machine to work from a non-elevated session (unlike TPM/BitLocker above) - real
+# RealTimeProtectionEnabled boolean and real AntivirusSignatureLastUpdated/QuickScanEndTime/
+# FullScanEndTime timestamps, no elevation-vs-absence ambiguity to catch separately here.
+# FullScanEndTime genuinely comes back $null on this real machine (never run a full scan, only
+# quick scans) - a real, honest absence, not a query failure.
+$defenderStatus = $null
+try {
+    $defenderStatus = Get-CimInstance -Namespace "root/Microsoft/Windows/Defender" -ClassName MSFT_MpComputerStatus -ErrorAction Stop |
+        Select-Object RealTimeProtectionEnabled, AntivirusSignatureLastUpdated, QuickScanEndTime, FullScanEndTime
+} catch {
+    $defenderStatus = $null
+}
+
+# SecurityCenter2's AntiVirusProduct - the same registration mechanism Windows Security Center's
+# own UI reads, so it also picks up third-party AV (a machine running Norton/McAfee instead of
+# Defender shows THAT product's displayName here, not Defender's). Deliberately only reads
+# displayName - productState is an undocumented, unofficially reverse-engineered bitmask with no
+# Microsoft-published bit layout, and would add nothing for Defender specifically anyway since
+# MSFT_MpComputerStatus above already gives clean, documented booleans for the same facts.
+# @(...) wraps the result because Select-Object collapses a single CIM instance to a bare object,
+# not a one-element array - the same gotcha $net/$disks below already guard against - which would
+# otherwise break downstream array handling on the (common) single-AV-product case.
+$avProducts = @()
+try {
+    $avProducts = @(Get-CimInstance -Namespace "root/SecurityCenter2" -ClassName AntiVirusProduct -ErrorAction Stop |
+        Select-Object displayName)
+} catch {
+    $avProducts = @()
+}
+
 # Get-ComputerInfo also exposes BiosFirmwareType, but it gathers a large amount of unrelated
 # system info (hotfix lists, etc.) and is known to take several seconds - too slow for a poller
 # on a 5s interval with a 15s timeout. $env:firmware_type is the same underlying data (set by
@@ -429,6 +460,8 @@ $result = [ordered]@{
     batteryReportHealth   = $batteryReportHealth
     secureBootEnabled     = $secureBootEnabled
     bitlockerStatus       = $bitlockerStatus
+    defenderStatus        = $defenderStatus
+    avProducts            = @($avProducts)
     bootMode              = $bootMode
     localIp               = $localIp
     driverVersions        = $driverVersions

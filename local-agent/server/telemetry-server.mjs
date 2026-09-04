@@ -2694,6 +2694,21 @@ function strOrNull(v) {
   const t = v.trim();
   return t.length > 0 ? t : null;
 }
+// get-telemetry.ps1 runs under real Windows PowerShell 5.1 (execTelemetryScript invokes
+// "powershell.exe", not pwsh) - confirmed live that its ConvertTo-Json serializes CIM DateTime
+// properties as the legacy WCF/MSAJAX "/Date(1788414870000)/" wrapped-epoch-ms format, not a
+// clean ISO string (which is what PowerShell 7 would produce - easy to be misled testing this
+// interactively, since this session's own shell tool runs pwsh). No other DateTime-typed WMI
+// field is actually read downstream today (BIOS ReleaseDate, battery ManufactureDate, etc. are
+// collected but never consumed), so this is scoped to Defender's timestamps specifically rather
+// than retrofitted everywhere speculatively.
+function parseWcfDate(v) {
+  if (typeof v !== "string") return null;
+  const m = v.match(/^\/Date\((-?\d+)\)\/$/);
+  if (!m) return null;
+  const d = new Date(Number(m[1]));
+  return Number.isNaN(d.getTime()) ? null : d.toISOString();
+}
 function putDetail(detail, key, value) {
   if (value === null || value === undefined || value === "") return;
   detail[key] = value;
@@ -2846,6 +2861,27 @@ function extractLiveStatusFields(data) {
   putDetail(detail, "mdmEnrolled", typeof data?.domainMdm?.mdmEnrolled === "boolean" ? data.domainMdm.mdmEnrolled : null);
   putDetail(detail, "domainMdmTenantName", strOrNull(data?.domainMdm?.tenantName));
   putDetail(detail, "domainMdmCheckedAt", strOrNull(data?.domainMdm?.checkedAt));
+  // Real antivirus/Defender status - MSFT_MpComputerStatus (Windows Defender's own native API,
+  // confirmed live on this machine to work unelevated, unlike TPM/BitLocker above) for the
+  // real-time-protection/signature-currency/last-scan facts, plus SecurityCenter2's
+  // AntiVirusProduct for the broader "what AV product(s) are actually registered" signal (the
+  // same registration mechanism third-party AV uses, so this isn't Defender-only). Deliberately
+  // NOT decoding SecurityCenter2's own productState bitmask - it has no Microsoft-published bit
+  // layout, every public "decoder" for it is reverse-engineered and inconsistent, and it would add
+  // nothing for Defender specifically since MSFT_MpComputerStatus already gives clean, documented
+  // booleans for the same facts. avProductNames is sent as a real array (never a boolean) since a
+  // genuinely empty array ("queried fine, nothing registered") is itself a meaningful, different
+  // signal from null ("couldn't check this cycle") - putDetail only skips null/undefined/"", so
+  // [] still reaches device_live_status.detail honestly.
+  putDetail(detail, "defenderRealTimeProtectionEnabled", typeof data?.defenderStatus?.RealTimeProtectionEnabled === "boolean" ? data.defenderStatus.RealTimeProtectionEnabled : null);
+  putDetail(detail, "defenderSignatureLastUpdated", parseWcfDate(data?.defenderStatus?.AntivirusSignatureLastUpdated));
+  putDetail(detail, "defenderQuickScanAt", parseWcfDate(data?.defenderStatus?.QuickScanEndTime));
+  putDetail(detail, "defenderFullScanAt", parseWcfDate(data?.defenderStatus?.FullScanEndTime));
+  putDetail(
+    detail,
+    "avProductNames",
+    Array.isArray(data?.avProducts) ? data.avProducts.map((p) => strOrNull(p?.displayName)).filter(Boolean) : null,
+  );
 
   return { cpuPct, ramPct, diskPct, batteryPct, detail: Object.keys(detail).length > 0 ? detail : undefined };
 }
