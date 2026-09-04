@@ -30,7 +30,7 @@ $batteryRunTimeRaw = (Get-CimInstance Win32_Battery | Select-Object -First 1 Est
 $batteryRunTimeMinutes = if ($null -ne $batteryRunTimeRaw -and $batteryRunTimeRaw -ne 71582788) { $batteryRunTimeRaw } else { $null }
 
 $gpu = Get-CimInstance Win32_VideoController |
-    Select-Object Name, AdapterRAM, DriverVersion, AdapterCompatibility
+    Select-Object Name, AdapterRAM, DriverVersion, AdapterCompatibility, DriverDate
 
 $net = Get-CimInstance Win32_NetworkAdapter |
     Where-Object {

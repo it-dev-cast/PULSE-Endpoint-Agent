@@ -2793,6 +2793,13 @@ function extractLiveStatusFields(data) {
   const realGpus = (Array.isArray(data?.gpu) ? data.gpu : []).filter((g) => g?.Name && !gpuSkip.test(g.Name));
   const firstGpu = realGpus.find((g) => /nvidia|geforce|quadro|rtx |radeon|arc a\d/i.test(g.Name)) || realGpus[0] || (Array.isArray(data?.gpu) ? data.gpu[0] : null);
   putDetail(detail, "gpuName", strOrNull(firstGpu?.Name));
+  // gpuDriverVersion was already collected (get-telemetry.ps1's $gpu has selected DriverVersion
+  // since the first commit), just never read downstream. gpuDriverDate is genuinely new
+  // collection - see mergeRustData's own comment above on why the GPU merge had to become an
+  // additive overlay (rust's own Win32_VideoController query has no DriverDate field) rather than
+  // just adding the field to get-telemetry.ps1 alone.
+  putDetail(detail, "gpuDriverVersion", strOrNull(firstGpu?.DriverVersion));
+  putDetail(detail, "gpuDriverDate", parseWcfDate(firstGpu?.DriverDate));
   putDetail(detail, "gpuUtilPct", numOrNull(data?.gpuUtilization));
   putDetail(detail, "gpuTempC", numOrNull(data?.hardwareMonitor?.gpuTempC));
   putDetail(detail, "batteryHealthPct", batteryHealthFromTelemetry(data));
@@ -3479,7 +3486,18 @@ function mergeRustData(ps, rust) {
   }
 
   if (Array.isArray(rust.gpu) && rust.gpu.length > 0) {
+    // Additive overlay by Name, not a wholesale replace - same reasoning as storageHealth's own
+    // overlay below. Safe here because both PS ($gpu, Win32_VideoController) and rust query the
+    // identical WMI class with zero filtering on either side (unlike network, where PS excludes
+    // Tailscale/virtual adapters and rust doesn't - name-matching would be unreliable there).
+    // Necessary, not just cautious: rust's own Win32_VideoController struct has no DriverDate
+    // field at all, so the previous wholesale `ps.gpu = rust.gpu.map(...)` silently dropped
+    // DriverDate on every cycle rust succeeds - most of them - even after PS started collecting
+    // it. Existing ps.gpu fields survive via the spread; only Name/AdapterRAM/DriverVersion/
+    // AdapterCompatibility flip priority to rust, unchanged from before.
+    const existingGpuByName = new Map((Array.isArray(ps.gpu) ? ps.gpu : []).filter(Boolean).map((g) => [g.Name, g]));
     ps.gpu = rust.gpu.map((g) => ({
+      ...(existingGpuByName.get(g.name) ?? {}),
       Name: g.name,
       AdapterRAM: g.adapterRAMBytes,
       DriverVersion: g.driverVersion,
