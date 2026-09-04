@@ -2687,6 +2687,17 @@ function extractLiveStatusFields(data) {
   // pending."
   putDetail(detail, "windowsUpdatePendingCount", numOrNull(data?.windowsUpdate?.pendingCount));
   putDetail(detail, "windowsUpdateCheckedAt", strOrNull(data?.windowsUpdate?.checkedAt));
+  // Real BIOS/firmware update check (runBiosFirmwareUpdateCheck, same hourly WUA search
+  // cadence as Windows Update above) - same reasoning: already computed for the local Tauri
+  // UI's own cache, just not previously included in what reaches the Cloud Command Center.
+  // updateAvailable is already the real source fact itself (unlike windowsUpdate's own
+  // pendingCount, there's no raw count worth sending separately here - runBiosFirmwareUpdateCheck
+  // never exposes one, only whether a real System Firmware driver update was found), so it's
+  // sent as-is rather than a derived boolean recomputed from something else. checkedAt follows
+  // the same "not checked yet" honesty as windowsUpdateCheckedAt.
+  putDetail(detail, "biosFirmwareUpdateAvailable", typeof data?.biosFirmwareUpdate?.updateAvailable === "boolean" ? data.biosFirmwareUpdate.updateAvailable : null);
+  putDetail(detail, "biosFirmwareLatestVersion", strOrNull(data?.biosFirmwareUpdate?.latestVersion));
+  putDetail(detail, "biosFirmwareCheckedAt", strOrNull(data?.biosFirmwareUpdate?.checkedAt));
 
   return { cpuPct, ramPct, diskPct, batteryPct, detail: Object.keys(detail).length > 0 ? detail : undefined };
 }
