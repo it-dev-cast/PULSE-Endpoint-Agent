@@ -274,6 +274,18 @@ let biosFirmwareUpdateState = null;
 // windowsUpdateState/biosFirmwareUpdateState.
 let domainMdmState = null;
 
+// { licenseStatus: number, licenseFamily: string | null, productKeyChannel: string | null,
+// checkedAt: string } | null - real SoftwareLicensingProduct data, same hourly cadence as
+// windowsUpdateState/biosFirmwareUpdateState/domainMdmState above. NOT a cheap query like
+// dsregcmd - confirmed live on this machine that Get-CimInstance SoftwareLicensingProduct alone
+// takes ~42 SECONDS (WMI enumerating ~60 decoy placeholder SKU rows before this app's own filter
+// narrows to the one real license). This was originally wired into get-telemetry.ps1's per-5s
+// cycle and broke live telemetry collection entirely (blew past the 30s script timeout, killing
+// the whole cycle's output, not just this field) - moved here specifically because license status
+// is exactly the kind of slow-changing fact the hourly cadence exists for, same reasoning as the
+// other three. null means no real check has ever completed yet, same honest-Unknown convention.
+let windowsLicenseState = null;
+
 // { battery: MetricPrediction, ssd: MetricPrediction } | null - ai-service's real regression
 // result, updated by runBackendCycle at most once per real calendar day (see
 // METRIC_SNAPSHOT_STATE_PATH). null means no real prediction has ever completed (not enrolled,
@@ -1463,6 +1475,68 @@ async function runDomainMdmCheck() {
     };
   } catch (e) {
     console.error("[telemetry] domain/MDM status check produced unparseable output:", e.message, "raw:", stdout);
+    return null;
+  }
+}
+
+// SoftwareLicensingProduct, filtered to Windows itself (ApplicationID is the well-known,
+// Microsoft-documented GUID for the Windows OS product - excludes Office/other products that
+// also register in this same WMI class). Confirmed live on this real machine: this filter alone
+// still returns 61 rows - almost all decoy placeholder SKUs (every edition/channel combination
+// the licensing service merely knows about, LicenseStatus=0, blank PartialProductKey)
+// representing nothing actually installed. Only ONE row is real, and PartialProductKey
+// (non-empty only on that real row) is the reliable way to find it - the same signal
+// slmgr.vbs /dli itself uses internally, not invented for this task. Falls back to any row with
+// LicenseStatus -ne 0 if none has a key - unverified on this machine (it IS licensed), a
+// reasonable but untested guess for a genuinely unlicensed/grace-period device. LicenseStatus
+// itself (unlike SecurityCenter2's undocumented productState) is a small, Microsoft-documented
+// enum - decoded downstream, not here.
+const WINDOWS_LICENSE_STATUS_SCRIPT = `
+try {
+    $licenseProducts = Get-CimInstance SoftwareLicensingProduct -Filter "ApplicationID='55c92734-d682-4d71-983e-d6ec3f16059f'" -ErrorAction Stop
+    $realLicense = $licenseProducts | Where-Object { $_.PartialProductKey } | Select-Object -First 1
+    if (-not $realLicense) {
+        $realLicense = $licenseProducts | Where-Object { $_.LicenseStatus -ne 0 } | Select-Object -First 1
+    }
+    if ($realLicense) {
+        [PSCustomObject]@{
+            ok = $true
+            licenseStatus = [int]$realLicense.LicenseStatus
+            licenseFamily = $realLicense.LicenseFamily
+            productKeyChannel = $realLicense.ProductKeyChannel
+        } | ConvertTo-Json -Compress
+    } else {
+        [PSCustomObject]@{ ok = $false; error = "no real license row found among $($licenseProducts.Count) SoftwareLicensingProduct rows" } | ConvertTo-Json -Compress
+    }
+} catch {
+    [PSCustomObject]@{ ok = $false; error = $_.Exception.Message } | ConvertTo-Json -Compress
+}
+`;
+
+// Measured directly on this machine at ~42s for the real query (WMI enumerating ~60 rows before
+// this script's own filter narrows it down) - 60s covers that comfortably without this ever
+// being mistaken for a hang, given how infrequently it's actually called (hourly).
+async function runWindowsLicenseCheck() {
+  const { err, stdout, stderr } = await execPowerShellCommand(WINDOWS_LICENSE_STATUS_SCRIPT, 60000);
+  if (err) {
+    console.error("[telemetry] Windows license check failed to run:", err.message);
+    if (stderr) console.error("[telemetry]   stderr:", stderr.toString());
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(stdout);
+    if (!parsed.ok) {
+      console.error("[telemetry] Windows license check completed but reported failure:", parsed.error);
+      return null;
+    }
+    return {
+      licenseStatus: parsed.licenseStatus,
+      licenseFamily: parsed.licenseFamily || null,
+      productKeyChannel: parsed.productKeyChannel || null,
+      checkedAt: new Date().toISOString(),
+    };
+  } catch (e) {
+    console.error("[telemetry] Windows license check produced unparseable output:", e.message, "raw:", stdout);
     return null;
   }
 }
@@ -2920,13 +2994,13 @@ function extractLiveStatusFields(data) {
     "avProductNames",
     Array.isArray(data?.avProducts) ? data.avProducts.map((p) => strOrNull(p?.displayName)).filter(Boolean) : null,
   );
-  // Real Windows license/activation status - get-telemetry.ps1 has already done the hard part
-  // (isolating the one real SoftwareLicensingProduct row among ~60 decoy placeholder SKUs via
-  // PartialProductKey - see its own comment). licenseStatus is sent as the raw integer, not
-  // decoded here - it's a small, Microsoft-documented enum (0=Unlicensed, 1=Licensed, 2=OOBGrace,
-  // 3=OOTGrace, 4=NonGenuineGrace, 5=Notification, 6=ExtendedGrace), decoded client-side same as
-  // the NVMe critical_warning bitmask - raw source fact from the agent, display logic in the
-  // dashboard.
+  // Real Windows license/activation status - runWindowsLicenseCheck's own hourly check (see its
+  // comment for why this moved off the per-5s get-telemetry.ps1 path: the real query takes ~42s,
+  // which was blowing the whole script's 30s timeout and killing every field, not just this one).
+  // licenseStatus is sent as the raw integer, not decoded here - it's a small, Microsoft-
+  // documented enum (0=Unlicensed, 1=Licensed, 2=OOBGrace, 3=OOTGrace, 4=NonGenuineGrace,
+  // 5=Notification, 6=ExtendedGrace), decoded client-side same as the NVMe critical_warning
+  // bitmask - raw source fact from the agent, display logic in the dashboard.
   putDetail(detail, "windowsLicenseStatus", numOrNull(data?.windowsLicense?.licenseStatus));
   putDetail(detail, "windowsLicenseFamily", strOrNull(data?.windowsLicense?.licenseFamily));
   putDetail(detail, "windowsLicenseChannel", strOrNull(data?.windowsLicense?.productKeyChannel));
@@ -3298,20 +3372,22 @@ async function runBackendCycle() {
   }
 
   // Real Windows Update checks (software updates + BIOS/system firmware updates + domain-join/
-  // MDM status), on their own slower WINDOWS_UPDATE_CHECK_INTERVAL_MS cadence (see that constant's
-  // and runWindowsUpdateCheck's/runBiosFirmwareUpdateCheck's/runDomainMdmCheck's own comments for
-  // why). Unlike the hardware-check/snapshot/prediction blocks above, this is NOT gated on
-  // `entitlement` - whether this real machine has pending updates or is domain/MDM-managed is a
-  // pure local OS fact, unrelated to Cloud Command Center enrollment. Run together (Promise.all)
-  // on the same shared timer - runDomainMdmCheck is cheap/local (dsregcmd, no network) unlike the
-  // other two's WUA searches, but there's no freshness reason for it to run more often, so it
-  // piggybacks on the existing cadence rather than inventing a second timer for one fast check.
+  // MDM status + license/activation status), on their own slower WINDOWS_UPDATE_CHECK_INTERVAL_MS
+  // cadence (see that constant's and runWindowsUpdateCheck's/runBiosFirmwareUpdateCheck's/
+  // runDomainMdmCheck's/runWindowsLicenseCheck's own comments for why). Unlike the hardware-check/
+  // snapshot/prediction blocks above, this is NOT gated on `entitlement` - whether this real
+  // machine has pending updates, is domain/MDM-managed, or is licensed is a pure local OS fact,
+  // unrelated to Cloud Command Center enrollment. Run together (Promise.all) on the same shared
+  // timer - runDomainMdmCheck is cheap/local (dsregcmd, no network) and runWindowsLicenseCheck is
+  // genuinely slow (~42s, WMI enumerating ~60 decoy license rows), but neither needs sub-hourly
+  // freshness, so both piggyback on the existing cadence rather than inventing new timers.
   if (Date.now() - lastWindowsUpdateCheckAt >= WINDOWS_UPDATE_CHECK_INTERVAL_MS) {
     lastWindowsUpdateCheckAt = Date.now();
-    const [softwareResult, biosResult, domainMdmResult] = await Promise.all([
+    const [softwareResult, biosResult, domainMdmResult, licenseResult] = await Promise.all([
       withTimeout(runWindowsUpdateCheck(), WINDOWS_UPDATE_CHECK_TIMEOUT_MS, "Windows Update check"),
       withTimeout(runBiosFirmwareUpdateCheck(), WINDOWS_UPDATE_CHECK_TIMEOUT_MS, "BIOS firmware update check"),
       withTimeout(runDomainMdmCheck(), WINDOWS_UPDATE_CHECK_TIMEOUT_MS, "domain/MDM status check"),
+      withTimeout(runWindowsLicenseCheck(), WINDOWS_UPDATE_CHECK_TIMEOUT_MS, "Windows license check"),
     ]);
     if (softwareResult) {
       windowsUpdateState = softwareResult;
@@ -3324,6 +3400,10 @@ async function runBackendCycle() {
     if (domainMdmResult) {
       domainMdmState = domainMdmResult;
       console.log(`[telemetry] domain/MDM status check: azureAdJoined=${domainMdmResult.azureAdJoined} domainJoined=${domainMdmResult.domainJoined} workplaceJoined=${domainMdmResult.workplaceJoined} mdmEnrolled=${domainMdmResult.mdmEnrolled}`);
+    }
+    if (licenseResult) {
+      windowsLicenseState = licenseResult;
+      console.log(`[telemetry] Windows license check: status=${licenseResult.licenseStatus} family=${licenseResult.licenseFamily} channel=${licenseResult.productKeyChannel}`);
     }
   }
 }
@@ -3797,6 +3877,7 @@ async function collect() {
     parsed.windowsUpdate = windowsUpdateState;
     parsed.biosFirmwareUpdate = biosFirmwareUpdateState;
     parsed.domainMdm = domainMdmState;
+    parsed.windowsLicense = windowsLicenseState;
     cache = { data: parsed, error: null, updatedAt: new Date().toISOString() };
 
     // Fire-and-forget (not awaited) - see postLiveStatus's own comment on why this must never
