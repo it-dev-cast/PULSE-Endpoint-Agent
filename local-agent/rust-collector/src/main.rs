@@ -224,7 +224,18 @@ fn run_collect() {
     const E_ACCESSDENIED: i32 = 0x8007_0005_u32 as i32;
     let is_access_denied = |hres: i32| hres == WBEM_E_ACCESS_DENIED || hres == E_ACCESSDENIED;
 
-    let tpm: Option<serde_json::Value> = (|| {
+    // Spawned onto its own OS thread rather than run inline - profiled directly (Measure/Instant
+    // timing, 3 consecutive runs) at ~5.0-5.04s EVERY time, together with bitlocker below
+    // accounting for ~88-89% of this whole program's ~11.3-11.7s runtime. Cross-checked against
+    // real production evidence (live consecutive collect() cycle deltas on the actual elevated
+    // Scheduled Task closely matched this same non-elevated reproduction, not dramatically
+    // faster) - real evidence this ~5s is an inherent COM/DCOM cost of querying this specific
+    // secured namespace, not merely an access-denied failure delay, so there's no WMI-side fix
+    // available. Spawning this and bitlocker concurrently (joined at the end of run_collect,
+    // after every other sequential step) overlaps their two ~5s costs instead of paying both in
+    // series, cutting this program's total from ~11.7s toward ~6-7s. is_access_denied is `move`d
+    // in - a zero-capture closure over two local consts, trivially Copy+Send.
+    let tpm_handle: thread::JoinHandle<Option<serde_json::Value>> = thread::spawn(move || {
         let com_lib = match COMLibrary::new() {
             Ok(c) => c,
             Err(e) => {
@@ -275,7 +286,7 @@ fn run_collect() {
                 None
             }
         }
-    })();
+    });
 
     // sysinfo has no dedicated GPU API. Its Components API (the same one used for CPU temps
     // elsewhere in this ecosystem) was checked directly on this machine via a throwaway probe
@@ -465,7 +476,11 @@ fn run_collect() {
     let is_not_supported =
         |hres: i32| hres == WBEM_E_NOT_FOUND || hres == WBEM_E_INVALID_NAMESPACE || hres == WBEM_E_INVALID_CLASS;
 
-    let bitlocker_status: Option<&'static str> = (|| {
+    // Same reasoning as tpm_handle above - spawned concurrently with it (profiled at ~5.0-5.02s
+    // every run, together the two dominate this program's runtime) rather than run in series.
+    // is_access_denied/is_not_supported are both `move`d in as trivially Copy+Send zero-capture
+    // closures, same as tpm_handle.
+    let bitlocker_handle: thread::JoinHandle<Option<&'static str>> = thread::spawn(move || {
         let system_drive = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".to_owned());
 
         let com_lib = match COMLibrary::new() {
@@ -539,7 +554,7 @@ fn run_collect() {
                 None
             }
         }
-    })();
+    });
 
     // Two real candidate sources exist for Secure Boot status on Windows. PowerShell's
     // Confirm-SecureBootUEFI has no direct WMI equivalent and is already confirmed elsewhere in
@@ -770,6 +785,21 @@ fn run_collect() {
             serde_json::Value::Null
         }
     };
+
+    // Joined here, last - everything above (gpu/network/secure_boot/storage_health/hwinfo) has
+    // already run sequentially in the meantime, so both threads have had this program's entire
+    // remaining runtime to finish their ~5s WMI calls concurrently instead of one after the
+    // other. A panic inside either closure (neither is expected to - both return via match arms,
+    // no unwrap on the query path) is handled the same honest way a real query failure already
+    // is: None, not a crash of this whole program over one signal.
+    let tpm = tpm_handle.join().unwrap_or_else(|_| {
+        eprintln!("[pulse-telemetry] tpm: collection thread panicked - reporting as unavailable, not crashing the whole program over one signal.");
+        None
+    });
+    let bitlocker_status = bitlocker_handle.join().unwrap_or_else(|_| {
+        eprintln!("[pulse-telemetry] bitlocker: collection thread panicked - reporting as unavailable, not crashing the whole program over one signal.");
+        None
+    });
 
     let payload = json!({
         "cpu": cpu,
