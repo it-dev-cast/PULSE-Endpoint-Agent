@@ -3690,6 +3690,16 @@ async function backendPollLoop() {
 // this path. 45s (up from 30s) is deliberate defense-in-depth on top of those moves, not a
 // substitute for them - real-world WMI provider variance (a colder day, a busier machine) could
 // still occasionally push even the trimmed path higher than expected.
+//
+// Separately confirmed via direct A/B testing: this script runs ~2-3s slower under the real
+// Scheduled Task's elevated (RunLevel:Highest) context (~10-11s observed via production
+// process-monitor captures) than non-elevated testing suggests (~7.85-8.17s, both against the
+// dev-tree copy and the actual deployed Program Files copy). File location, WMI provider-host
+// state, and rust-collector contention were all directly ruled out as the cause - the gap tracks
+// elevation itself. Mechanism unconfirmed (likely per-call token/security-descriptor evaluation
+// under an elevated admin token, spread across this script's ~20 Get-CimInstance calls), but the
+// magnitude is small and stable, well inside the 45s timeout margin above - not worth further
+// investigation.
 const SCRIPT_TIMEOUT_MS = 45000;
 
 function execTelemetryScript() {
