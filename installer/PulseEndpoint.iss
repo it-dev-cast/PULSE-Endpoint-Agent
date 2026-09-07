@@ -126,7 +126,20 @@ Source: "redist\windowsdesktop-runtime-10.0.11-win-x64.exe"; DestDir: "{tmp}"; F
 var
   AppShortPath: String;
   JwtSecret, AdminPassword: String;
-  BackendUrlPage: TInputQueryWizardPage;
+  NetworkModePage: TWizardPage;
+  LanRadio, TailscaleRadio: TNewRadioButton;
+  BackendUrlEdit: TNewEdit;
+  TailscaleWarningLabel: TNewStaticText;
+
+const
+  // The Command Centre's own known Tailscale address - a real, current value, not a placeholder;
+  // update this if that machine's Tailscale IP ever changes. Only ever used as a starting-point
+  // pre-fill (see NetworkModeRadioClick) - the field stays a real, editable TNewEdit either way.
+  KNOWN_TAILSCALE_IP = '100.126.253.38';
+  // Real, standard Tailscale-for-Windows install path - not guessed, this is where its own
+  // installer places it on every machine confirmed running it this project (this dev machine
+  // included).
+  TAILSCALE_EXE_PATH = 'C:\Program Files\Tailscale\tailscale.exe';
 
 function CmdLineBackendUrl(): String;
 begin
@@ -147,7 +160,62 @@ function ResolvedBackendUrl(): String;
 begin
   Result := CmdLineBackendUrl();
   if Result = '' then
-    Result := Trim(BackendUrlPage.Values[0]);
+    Result := Trim(BackendUrlEdit.Text);
+end;
+
+// Real check, not a stub - same cmd.exe-redirect-to-a-tempfile idiom SmokeTestRustCollector
+// already uses below (Inno's own Exec has no stdout capture of its own). Two real signals, both
+// required: the exe existing at its real, standard install path, AND a genuine `tailscale
+// status` exit code 0 - installed-but-logged-out/stopped still fails this deliberately, since
+// "the binary is present" isn't the same real fact as "this device can actually reach another
+// Tailscale IP right now," which is what actually matters here. Best-effort by design (see its
+// own call site's comment) - this only ever decides whether to show a warning, never blocks Next.
+function IsTailscaleConnected(): Boolean;
+var
+  OutPath, Cmd: String;
+  ResultCode: Integer;
+begin
+  Result := False;
+  if not FileExists(TAILSCALE_EXE_PATH) then
+    Exit;
+  OutPath := ExpandConstant('{tmp}') + '\tailscale-status-check.txt';
+  Cmd := '/C ""' + TAILSCALE_EXE_PATH + '" status > "' + OutPath + '" 2>&1"';
+  DeleteFile(OutPath);
+  Exec('cmd.exe', Cmd, '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  DeleteFile(OutPath);
+  Result := ResultCode = 0;
+end;
+
+// Re-runs the real check above and shows/hides the warning accordingly - called both the moment
+// the Tailscale radio is selected (immediate feedback) and again from NextButtonClick (catches
+// "installed it mid-wizard, in between selecting the radio and clicking Next"). Deliberately
+// never blocks Next either way - someone can genuinely install Tailscale right after finishing
+// this wizard, and the agent will pick it up on its own the next time it tries to reach the
+// backend, same as any other real network-reachability problem this installer can't fix for them.
+procedure RefreshTailscaleWarning();
+begin
+  if TailscaleRadio.Checked and (not IsTailscaleConnected()) then
+  begin
+    TailscaleWarningLabel.Caption :=
+      'Tailscale wasn''t detected as installed and connected on this device. Install it from ' +
+      'tailscale.com/download and sign in - this won''t block Next, but the agent won''t be ' +
+      'reachable over Tailscale until that''s done.';
+    TailscaleWarningLabel.Visible := True;
+  end
+  else
+    TailscaleWarningLabel.Visible := False;
+end;
+
+// Shared OnClick for both radios (which one fired is read from Checked state, not the Sender -
+// simpler than two near-identical handlers). Pre-fills the known Tailscale IP only if the field
+// is currently empty - deliberately never overwrites something already typed, whichever radio is
+// selected, so "keep the field editable" holds in both directions rather than surprising anyone
+// who already entered a real address.
+procedure NetworkModeRadioClick(Sender: TObject);
+begin
+  if TailscaleRadio.Checked and (Trim(BackendUrlEdit.Text) = '') then
+    BackendUrlEdit.Text := 'http://' + KNOWN_TAILSCALE_IP + ':8443';
+  RefreshTailscaleWarning();
 end;
 
 function InitializeSetup(): Boolean;
@@ -167,34 +235,91 @@ begin
   end;
 end;
 
+// Custom page (not TInputQueryWizardPage, which can't host radio buttons) so the network-mode
+// choice and the backend URL field can live together and interact live - selecting Tailscale
+// mode pre-fills/validates the very field it sits above, which a separate preceding page
+// couldn't do without awkward cross-page state syncing.
 procedure InitializeWizard();
+var
+  ExplainerLabel, BackendUrlLabel: TNewStaticText;
 begin
-  BackendUrlPage := CreateInputQueryPage(wpSelectComponents,
-    'Central Backend Address', 'Where should this agent report to?',
-    'Enter the address THIS laptop can actually reach, e.g. http://<command-center-ip>:8443. ' +
-    'Same Tailscale account: the Command Centre PC''s 100.x address. Different Tailscale accounts: ' +
-    'the Shared-in IP from THIS laptop''s Tailscale Machines page - not the IP shown on the Command Centre PC. ' +
-    'Silent: /VERYSILENT /TYPE=agent /BACKENDURL=http://HOST:8443');
-  BackendUrlPage.Add('Backend URL:', False);
+  NetworkModePage := CreateCustomPage(wpSelectComponents,
+    'Central Backend Address', 'Where should this agent report to, and over what network?');
+
+  ExplainerLabel := TNewStaticText.Create(NetworkModePage);
+  ExplainerLabel.Parent := NetworkModePage.Surface;
+  ExplainerLabel.Left := 0;
+  ExplainerLabel.Top := 0;
+  ExplainerLabel.Width := NetworkModePage.SurfaceWidth;
+  ExplainerLabel.AutoSize := False;
+  ExplainerLabel.Height := ScaleY(32);
+  ExplainerLabel.WordWrap := True;
+  ExplainerLabel.Caption :=
+    'Enter the address THIS laptop can actually reach. Silent install: ' +
+    '/VERYSILENT /TYPE=agent /BACKENDURL=http://HOST:8443';
+
+  LanRadio := TNewRadioButton.Create(NetworkModePage);
+  LanRadio.Parent := NetworkModePage.Surface;
+  LanRadio.Left := 0;
+  LanRadio.Top := ExplainerLabel.Top + ExplainerLabel.Height + ScaleY(8);
+  LanRadio.Width := NetworkModePage.SurfaceWidth;
+  LanRadio.Caption := 'Same Wi-Fi network as the Command Center';
+  LanRadio.Checked := True;
+  LanRadio.OnClick := @NetworkModeRadioClick;
+
+  TailscaleRadio := TNewRadioButton.Create(NetworkModePage);
+  TailscaleRadio.Parent := NetworkModePage.Surface;
+  TailscaleRadio.Left := 0;
+  TailscaleRadio.Top := LanRadio.Top + LanRadio.Height + ScaleY(4);
+  TailscaleRadio.Width := NetworkModePage.SurfaceWidth;
+  TailscaleRadio.Caption := 'Any network (requires Tailscale installed on this device)';
+  TailscaleRadio.OnClick := @NetworkModeRadioClick;
+
+  TailscaleWarningLabel := TNewStaticText.Create(NetworkModePage);
+  TailscaleWarningLabel.Parent := NetworkModePage.Surface;
+  TailscaleWarningLabel.Left := ScaleX(18);
+  TailscaleWarningLabel.Top := TailscaleRadio.Top + TailscaleRadio.Height + ScaleY(4);
+  TailscaleWarningLabel.Width := NetworkModePage.SurfaceWidth - ScaleX(18);
+  TailscaleWarningLabel.AutoSize := False;
+  TailscaleWarningLabel.Height := ScaleY(44);
+  TailscaleWarningLabel.WordWrap := True;
+  TailscaleWarningLabel.Font.Color := clMaroon;
+  TailscaleWarningLabel.Visible := False;
+
+  BackendUrlLabel := TNewStaticText.Create(NetworkModePage);
+  BackendUrlLabel.Parent := NetworkModePage.Surface;
+  BackendUrlLabel.Left := 0;
+  BackendUrlLabel.Top := TailscaleWarningLabel.Top + TailscaleWarningLabel.Height + ScaleY(12);
+  BackendUrlLabel.Caption := 'Backend URL:';
+
+  BackendUrlEdit := TNewEdit.Create(NetworkModePage);
+  BackendUrlEdit.Parent := NetworkModePage.Surface;
+  BackendUrlEdit.Left := 0;
+  BackendUrlEdit.Top := BackendUrlLabel.Top + BackendUrlLabel.Height + ScaleY(4);
+  BackendUrlEdit.Width := NetworkModePage.SurfaceWidth;
   if CmdLineBackendUrl() <> '' then
-    BackendUrlPage.Values[0] := CmdLineBackendUrl()
+    BackendUrlEdit.Text := CmdLineBackendUrl()
   else
-    BackendUrlPage.Values[0] := '';
+    BackendUrlEdit.Text := '';
 end;
 
 function ShouldSkipPage(PageID: Integer): Boolean;
 begin
   Result := False;
-  if PageID = BackendUrlPage.ID then
+  if PageID = NetworkModePage.ID then
     Result := WizardIsComponentSelected('backend') or WizardSilent or (CmdLineBackendUrl() <> '');
 end;
 
 function NextButtonClick(CurPageID: Integer): Boolean;
 begin
   Result := True;
-  if CurPageID = BackendUrlPage.ID then
+  if CurPageID = NetworkModePage.ID then
   begin
-    if not IsHttpBackendUrl(BackendUrlPage.Values[0]) then
+    // Re-checked here too (not just on radio-select) - catches Tailscale having been installed
+    // in the time between selecting that radio and clicking Next. Never blocks on its own, only
+    // the URL validation below does.
+    RefreshTailscaleWarning();
+    if not IsHttpBackendUrl(BackendUrlEdit.Text) then
     begin
       MsgBox('Enter the Command Centre address this laptop can reach (http://host:8443). Agent-only install cannot guess it.', mbError, MB_OK);
       Result := False;
