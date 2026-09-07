@@ -70,14 +70,6 @@ try {
     $thermalZones = @()
 }
 
-$tpm = $null
-try {
-    $tpm = Get-CimInstance -Namespace "root/cimv2/Security/MicrosoftTpm" -ClassName Win32_Tpm -ErrorAction Stop |
-        Select-Object ManufacturerIdTxt, ManufacturerVersion, SpecVersion, IsActivated_InitialValue, IsEnabled_InitialValue
-} catch {
-    $tpm = $null
-}
-
 # Confirm-SecureBootUEFI throws outright on legacy BIOS (non-UEFI) systems, and can also require
 # elevation beyond what's already guaranteed on some configurations - the catch handles both the
 # same way, falling back to null/sample rather than distinguishing the reason.
@@ -88,15 +80,13 @@ try {
     $secureBootEnabled = $null
 }
 
-# Get-BitLockerVolume needs the BitLocker PowerShell module, which isn't present on all Windows
-# editions (notably Home) - absent module or any other failure both fall back the same way.
-$bitlockerStatus = $null
-try {
-    $volume = Get-BitLockerVolume -MountPoint $env:SystemDrive -ErrorAction Stop
-    $bitlockerStatus = $volume.ProtectionStatus.ToString()
-} catch {
-    $bitlockerStatus = $null
-}
+# TPM (Win32_Tpm) and BitLocker (Get-BitLockerVolume) are NOT queried here anymore - profiled at
+# ~5s EACH on this real machine (non-elevated; unverified whether the real elevated Scheduled Task
+# timing differs), together over a third of this script's own ~27s baseline. rust-collector
+# already supplies both independently via its own separate, already-elevated read every cycle
+# (see mergeRustData) - this was a redundant fallback attempt costing real time on every single 5s
+# cycle. Moved to runTpmBitlockerFallbackCheck's hourly cadence (telemetry-server.mjs) instead,
+# used only when rust hasn't supplied a value that cycle.
 
 # MSFT_MpComputerStatus - Windows Defender's own native status API, confirmed live on this
 # machine to work from a non-elevated session (unlike TPM/BitLocker above) - real
@@ -313,69 +303,13 @@ try {
     $localIp = $null
 }
 
-# Real driver-version source for the Drivers & Firmware card, distinct from BIOS version/SSD
-# firmware which already have real values elsewhere (SMBIOSBIOSVersion, SMART data) and are
-# reused as-is rather than re-queried here. GPU driver version is also already real elsewhere
-# (Win32_VideoController.DriverVersion, read directly by the frontend) and reused rather than
-# duplicated below. Queried once and reused for all five categories rather than filtering
-# Win32_PnPSignedDriver five separate times. Each match pattern below was derived from what
-# this specific machine's driver list actually contains (captured live, not guessed) - like
-# hwinfo.rs's own sensor-name pattern lists, this can't be a single universal identifier since
-# there's no OS-standard "the chipset driver" or "the WiFi driver" marker; naming varies by
-# vendor and Windows lists many unrelated drivers under the same DeviceClass (e.g. a dozen
-# Microsoft-authored generic Bluetooth stack components alongside the one real Intel radio
-# driver). A device this pattern doesn't match on a different machine just stays null/sample,
-# same as everywhere else in this app.
-$pnpDrivers = $null
-try {
-    $pnpDrivers = @(Get-CimInstance Win32_PnPSignedDriver -ErrorAction Stop |
-        Select-Object DeviceName, DeviceClass, Manufacturer, DriverVersion, DriverDate)
-} catch {
-    $pnpDrivers = @()
-}
-
-function Select-PnpDriverVersion($drivers, [scriptblock]$matchPredicate) {
-    $match = $drivers | Where-Object $matchPredicate | Select-Object -First 1
-    if (-not $match) { return $null }
-    # Windows' own inbox/generic INF stubs report an obviously-bogus placeholder ship date
-    # (seen live: 7/18/1968 for this machine's Intel SMBus/chipset entry, long before this
-    # hardware or driver could exist) rather than leaving DriverDate blank - showing that
-    # literally would be a fabricated-looking date attached to a real version number, so any
-    # date before 1990 is treated the same as no date at all.
-    $dateVal = $null
-    if ($match.DriverDate -and $match.DriverDate.Year -ge 1990) {
-        $dateVal = $match.DriverDate.ToString("o")
-    }
-    return [ordered]@{ deviceName = $match.DeviceName; version = $match.DriverVersion; date = $dateVal }
-}
-
-$driverVersions = [ordered]@{
-    chipset   = Select-PnpDriverVersion $pnpDrivers { $_.DeviceName -match "SMBus|LPC Controller" -and $_.Manufacturer -eq "INTEL" }
-    intelMe   = Select-PnpDriverVersion $pnpDrivers { $_.DeviceName -match "Management Engine Interface" }
-    wifi      = Select-PnpDriverVersion $pnpDrivers { $_.DeviceClass -eq "NET" -and $_.DeviceName -match "Wi-Fi" -and $_.DeviceName -notmatch "Direct" }
-    audio     = Select-PnpDriverVersion $pnpDrivers { $_.DeviceClass -eq "MEDIA" -and $_.DeviceName -match "^(Realtek Audio|.*High Definition Audio.*)$" }
-    bluetooth = Select-PnpDriverVersion $pnpDrivers { $_.DeviceClass -eq "BLUETOOTH" -and $_.DeviceName -match "Wireless Bluetooth" }
-}
-
-# Real fingerprint sensor presence (Hardware Integrity card's "Fingerprint" row). Enrollment
-# status itself isn't reliably determinable here - that requires calling the WinBio API
-# (winbio.dll) directly, which needs native interop this project has nowhere else and whose real
-# enrollment introspection is restricted to the enrolled user's own logon session, not something
-# a background elevated process can cleanly read. Hardware PRESENCE, though, is a real, fully
-# determinable fact from the exact same PnP device state Windows' own Settings > Sign-in options
-# page relies on to decide whether to even offer fingerprint sign-in. Filtered to the Biometric
-# PNP class AND a name containing "Fingerprint" specifically - this hardware also has a real
-# "Facial Recognition (Windows Hello) Software Device" under the same Biometric class, a
-# different biometric modality this row isn't asking about.
-$fingerprintSensorPresent = $null
-try {
-    $fingerprintDevice = Get-CimInstance Win32_PnPEntity -Filter "PNPClass='Biometric'" -ErrorAction Stop |
-        Where-Object { $_.Name -match "Fingerprint" } |
-        Select-Object -First 1
-    $fingerprintSensorPresent = [bool]($fingerprintDevice -and $fingerprintDevice.Present)
-} catch {
-    $fingerprintSensorPresent = $null
-}
+# Driver versions (Win32_PnPSignedDriver) and fingerprint-sensor presence (Win32_PnPEntity) are
+# NOT queried here anymore - profiled at ~5.5s and ~0.8s respectively on this real machine.
+# PnPSignedDriver in particular is structurally slow (has to verify Authenticode signing details
+# for every driver package in the store, not just return cached inventory), unrelated to
+# filtering. Both are exactly the "essentially never changes between reboots" class of fact, so
+# both moved to runDriverVersionsCheck's/runFingerprintSensorCheck's hourly cadence
+# (telemetry-server.mjs) instead of the 5s hot path.
 
 # MDM/domain enrollment - real device state via dsregcmd.exe (built into Windows 10/11, no
 # admin required), not something WMI exposes. AzureAdJoined/DomainJoined/EnterpriseJoined
@@ -400,33 +334,23 @@ try {
     $mdmEnrollment = $null
 }
 
+# Size/FreeSpace/DeviceID/VolumeName/FileSystem stay on this 5s path - real-time disk usage %
+# feeds the live Disk StatCard/diskPct, a genuinely fast-changing fact. DiskModel/DiskSerial
+# (per-volume Get-Partition/Get-Disk enrichment) do NOT - profiled at ~1.3-2.2s combined with the
+# LogicalDisk query itself, and model/serial are static hardware facts that never change between
+# reboots. Moved to runDiskEnrichmentCheck's hourly cadence (telemetry-server.mjs), which
+# telemetry-server.mjs overlays onto these same entries by drive letter after this script returns
+# - see mergeRustData's own "additive overlay by Name" precedent (GPU) for why overlay-by-key,
+# not wholesale replace, is the safe way to combine a fast-path array with a slow-path enrichment.
 $logicalDisks = @(Get-CimInstance Win32_LogicalDisk -Filter "DriveType=3" | ForEach-Object {
     $vol = $_
     if ($null -eq $vol.Size -or $vol.Size -le 0) { return }
-    $diskModel = $null
-    $diskSerial = $null
-    $letter = $null
-    if ($vol.DeviceID -match '^([A-Za-z]):') { $letter = $Matches[1] }
-    if ($letter) {
-        try {
-            $part = Get-Partition -DriveLetter $letter -ErrorAction Stop | Select-Object -First 1
-            if ($null -ne $part) {
-                $pd = Get-Disk -Number $part.DiskNumber -ErrorAction Stop
-                if ($pd) {
-                    $diskModel = $pd.FriendlyName
-                    $diskSerial = $pd.SerialNumber
-                }
-            }
-        } catch {}
-    }
     [ordered]@{
         DeviceID    = $vol.DeviceID
         VolumeName  = $vol.VolumeName
         FileSystem  = $vol.FileSystem
         Size        = $vol.Size
         FreeSpace   = $vol.FreeSpace
-        DiskModel   = $diskModel
-        DiskSerial  = $diskSerial
     }
 })
 
@@ -458,7 +382,6 @@ $result = [ordered]@{
     board     = $board
     enclosure = $enclosure
     thermal   = @($thermalZones)
-    tpm       = $tpm
     batteryDetail = [ordered]@{
         status     = $batteryStatus
         static     = $batteryStatic
@@ -473,14 +396,11 @@ $result = [ordered]@{
     batteryRunTimeMinutes = $batteryRunTimeMinutes
     batteryReportHealth   = $batteryReportHealth
     secureBootEnabled     = $secureBootEnabled
-    bitlockerStatus       = $bitlockerStatus
     defenderStatus        = $defenderStatus
     avProducts            = @($avProducts)
     bootMode              = $bootMode
     localIp               = $localIp
-    driverVersions        = $driverVersions
     mdmEnrollment         = $mdmEnrollment
-    fingerprintSensorPresent = $fingerprintSensorPresent
 }
 
 $result | ConvertTo-Json -Depth 6 -Compress

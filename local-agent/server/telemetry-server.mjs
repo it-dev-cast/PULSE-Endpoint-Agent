@@ -286,6 +286,38 @@ let domainMdmState = null;
 // other three. null means no real check has ever completed yet, same honest-Unknown convention.
 let windowsLicenseState = null;
 
+// { chipset, intelMe, wifi, audio, bluetooth: { deviceName, version, date } | null } | null - real
+// Win32_PnPSignedDriver data (Drivers & Firmware card), same hourly cadence as the others.
+// Profiled at ~5.5-5.9s on this real machine - structurally slow (verifies Authenticode signing
+// for every driver package in the store, not just cached inventory), unrelated to filtering, so
+// no WMI-side optimization exists - just moved off the 5s hot path since driver versions/dates are
+// exactly the "essentially never changes between reboots" class of fact.
+let driverVersionsState = null;
+
+// { present: boolean, checkedAt: string } | null - real Win32_PnPEntity Biometric-class presence
+// check (Hardware Integrity card's Fingerprint row), same hourly cadence. Profiled at ~0.75-0.83s
+// - not as dramatic as the other moves, but sensor presence is equally a static hardware fact.
+let fingerprintSensorState = null;
+
+// { tpm: {...} | null, bitlockerStatus: string | null, checkedAt: string } | null - a FALLBACK
+// only, never the primary source: rust-collector already independently supplies both tpm and
+// bitlockerStatus every cycle via its own separate, already-elevated read (see mergeRustData) -
+// confirmed real tpmActive/bitlockerOn values already reach device_live_status.detail from that
+// path alone. get-telemetry.ps1's own per-5s attempts at these two profiled at ~5s EACH (measured
+// non-elevated - unverified whether the real elevated Scheduled Task's timing differs, but this
+// fallback's value doesn't depend on that answer either way), together over a third of the
+// script's ~27s baseline, for data rust already provides. Applied in collect() only when rust
+// hasn't supplied a value that cycle - see collect()'s own comment at the merge site.
+let tpmBitlockerFallbackState = null;
+
+// { letter: string, diskModel: string | null, diskSerial: string | null }[] | null - real
+// Get-Partition/Get-Disk per-volume enrichment (model/serial), overlaid onto the fast-path
+// logicalDisks array by drive letter (see collect()'s own merge comment) - the same "additive
+// overlay by key, not wholesale replace" pattern mergeRustData already uses for GPU. Size/
+// FreeSpace stay on the 5s path (real-time disk usage); model/serial are static hardware facts
+// profiled at ~1.3-2.2s combined with the LogicalDisk query itself, moved here instead.
+let diskEnrichmentState = null;
+
 // { battery: MetricPrediction, ssd: MetricPrediction } | null - ai-service's real regression
 // result, updated by runBackendCycle at most once per real calendar day (see
 // METRIC_SNAPSHOT_STATE_PATH). null means no real prediction has ever completed (not enrolled,
@@ -1537,6 +1569,199 @@ async function runWindowsLicenseCheck() {
     };
   } catch (e) {
     console.error("[telemetry] Windows license check produced unparseable output:", e.message, "raw:", stdout);
+    return null;
+  }
+}
+
+// Win32_PnPSignedDriver + the exact Select-PnpDriverVersion logic get-telemetry.ps1 used to run
+// every 5s - moved here verbatim, just on the hourly cadence. See DRIVER_VERSIONS_SCRIPT's own
+// module-level state var comment for why (profiled at ~5.5-5.9s, structurally slow regardless of
+// filtering).
+const PNP_DRIVER_VERSIONS_SCRIPT = `
+try {
+    $pnpDrivers = @(Get-CimInstance Win32_PnPSignedDriver -ErrorAction Stop |
+        Select-Object DeviceName, DeviceClass, Manufacturer, DriverVersion, DriverDate)
+
+    function Select-PnpDriverVersion($drivers, [scriptblock]$matchPredicate) {
+        $match = $drivers | Where-Object $matchPredicate | Select-Object -First 1
+        if (-not $match) { return $null }
+        $dateVal = $null
+        if ($match.DriverDate -and $match.DriverDate.Year -ge 1990) {
+            $dateVal = $match.DriverDate.ToString("o")
+        }
+        return [ordered]@{ deviceName = $match.DeviceName; version = $match.DriverVersion; date = $dateVal }
+    }
+
+    $driverVersions = [ordered]@{
+        chipset   = Select-PnpDriverVersion $pnpDrivers { $_.DeviceName -match "SMBus|LPC Controller" -and $_.Manufacturer -eq "INTEL" }
+        intelMe   = Select-PnpDriverVersion $pnpDrivers { $_.DeviceName -match "Management Engine Interface" }
+        wifi      = Select-PnpDriverVersion $pnpDrivers { $_.DeviceClass -eq "NET" -and $_.DeviceName -match "Wi-Fi" -and $_.DeviceName -notmatch "Direct" }
+        audio     = Select-PnpDriverVersion $pnpDrivers { $_.DeviceClass -eq "MEDIA" -and $_.DeviceName -match "^(Realtek Audio|.*High Definition Audio.*)$" }
+        bluetooth = Select-PnpDriverVersion $pnpDrivers { $_.DeviceClass -eq "BLUETOOTH" -and $_.DeviceName -match "Wireless Bluetooth" }
+    }
+    [PSCustomObject]@{ ok = $true; driverVersions = $driverVersions } | ConvertTo-Json -Compress -Depth 5
+} catch {
+    [PSCustomObject]@{ ok = $false; error = $_.Exception.Message } | ConvertTo-Json -Compress
+}
+`;
+
+// Measured directly at ~5.5-5.9s - 20s is generous headroom for an hourly call, not a tight ceiling.
+async function runDriverVersionsCheck() {
+  const { err, stdout, stderr } = await execPowerShellCommand(PNP_DRIVER_VERSIONS_SCRIPT, 20000);
+  if (err) {
+    console.error("[telemetry] driver versions check failed to run:", err.message);
+    if (stderr) console.error("[telemetry]   stderr:", stderr.toString());
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(stdout);
+    if (!parsed.ok) {
+      console.error("[telemetry] driver versions check completed but reported failure:", parsed.error);
+      return null;
+    }
+    return parsed.driverVersions ?? null;
+  } catch (e) {
+    console.error("[telemetry] driver versions check produced unparseable output:", e.message, "raw:", stdout);
+    return null;
+  }
+}
+
+// Win32_PnPEntity Biometric-class presence check, moved off the 5s hot path (~0.75-0.83s measured)
+// for the same "static hardware fact" reasoning as driver versions above.
+const FINGERPRINT_SENSOR_SCRIPT = `
+try {
+    $fingerprintDevice = Get-CimInstance Win32_PnPEntity -Filter "PNPClass='Biometric'" -ErrorAction Stop |
+        Where-Object { $_.Name -match "Fingerprint" } |
+        Select-Object -First 1
+    $present = [bool]($fingerprintDevice -and $fingerprintDevice.Present)
+    [PSCustomObject]@{ ok = $true; present = $present } | ConvertTo-Json -Compress
+} catch {
+    [PSCustomObject]@{ ok = $false; error = $_.Exception.Message } | ConvertTo-Json -Compress
+}
+`;
+
+async function runFingerprintSensorCheck() {
+  const { err, stdout, stderr } = await execPowerShellCommand(FINGERPRINT_SENSOR_SCRIPT, 20000);
+  if (err) {
+    console.error("[telemetry] fingerprint sensor check failed to run:", err.message);
+    if (stderr) console.error("[telemetry]   stderr:", stderr.toString());
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(stdout);
+    if (!parsed.ok) {
+      console.error("[telemetry] fingerprint sensor check completed but reported failure:", parsed.error);
+      return null;
+    }
+    return { present: !!parsed.present, checkedAt: new Date().toISOString() };
+  } catch (e) {
+    console.error("[telemetry] fingerprint sensor check produced unparseable output:", e.message, "raw:", stdout);
+    return null;
+  }
+}
+
+// TPM + BitLocker, bundled into one script since both were previously run every 5s together and
+// both are a FALLBACK only now - rust-collector already independently supplies both via its own
+// separate, already-elevated read every cycle (see mergeRustData and this check's own
+// module-level state var comment for the full reasoning). Each profiled at ~5s on this real
+// machine (non-elevated).
+const TPM_BITLOCKER_FALLBACK_SCRIPT = `
+try {
+    $tpm = $null
+    try {
+        $tpm = Get-CimInstance -Namespace "root/cimv2/Security/MicrosoftTpm" -ClassName Win32_Tpm -ErrorAction Stop |
+            Select-Object ManufacturerIdTxt, ManufacturerVersion, SpecVersion, IsActivated_InitialValue, IsEnabled_InitialValue
+    } catch {
+        $tpm = $null
+    }
+    $bitlockerStatus = $null
+    try {
+        $volume = Get-BitLockerVolume -MountPoint $env:SystemDrive -ErrorAction Stop
+        $bitlockerStatus = $volume.ProtectionStatus.ToString()
+    } catch {
+        $bitlockerStatus = $null
+    }
+    [PSCustomObject]@{ ok = $true; tpm = $tpm; bitlockerStatus = $bitlockerStatus } | ConvertTo-Json -Compress -Depth 4
+} catch {
+    [PSCustomObject]@{ ok = $false; error = $_.Exception.Message } | ConvertTo-Json -Compress
+}
+`;
+
+// 20s covers either query individually failing slowly (~5s each measured) with generous margin -
+// this is a fallback path, not relied upon every cycle, so there's no tight budget to hit.
+async function runTpmBitlockerFallbackCheck() {
+  const { err, stdout, stderr } = await execPowerShellCommand(TPM_BITLOCKER_FALLBACK_SCRIPT, 20000);
+  if (err) {
+    console.error("[telemetry] TPM/BitLocker fallback check failed to run:", err.message);
+    if (stderr) console.error("[telemetry]   stderr:", stderr.toString());
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(stdout);
+    if (!parsed.ok) {
+      console.error("[telemetry] TPM/BitLocker fallback check completed but reported failure:", parsed.error);
+      return null;
+    }
+    return {
+      tpm: parsed.tpm ?? null,
+      bitlockerStatus: parsed.bitlockerStatus ?? null,
+      checkedAt: new Date().toISOString(),
+    };
+  } catch (e) {
+    console.error("[telemetry] TPM/BitLocker fallback check produced unparseable output:", e.message, "raw:", stdout);
+    return null;
+  }
+}
+
+// Per-volume Get-Partition/Get-Disk model/serial enrichment, moved off the 5s hot path (~1.3-2.2s
+// combined with the LogicalDisk query itself) - static hardware facts overlaid onto the fast-path
+// logicalDisks array by drive letter in collect() (see its own merge comment).
+const DISK_ENRICHMENT_SCRIPT = `
+try {
+    $entries = @(Get-CimInstance Win32_LogicalDisk -Filter "DriveType=3" -ErrorAction Stop | ForEach-Object {
+        $vol = $_
+        $letter = $null
+        if ($vol.DeviceID -match '^([A-Za-z]):') { $letter = $Matches[1] }
+        if (-not $letter) { return }
+        $diskModel = $null
+        $diskSerial = $null
+        try {
+            $part = Get-Partition -DriveLetter $letter -ErrorAction Stop | Select-Object -First 1
+            if ($null -ne $part) {
+                $pd = Get-Disk -Number $part.DiskNumber -ErrorAction Stop
+                if ($pd) {
+                    $diskModel = $pd.FriendlyName
+                    $diskSerial = $pd.SerialNumber
+                }
+            }
+        } catch {}
+        [ordered]@{ letter = $letter; diskModel = $diskModel; diskSerial = $diskSerial }
+    })
+    [PSCustomObject]@{ ok = $true; volumes = $entries } | ConvertTo-Json -Compress -Depth 4
+} catch {
+    [PSCustomObject]@{ ok = $false; error = $_.Exception.Message } | ConvertTo-Json -Compress
+}
+`;
+
+async function runDiskEnrichmentCheck() {
+  const { err, stdout, stderr } = await execPowerShellCommand(DISK_ENRICHMENT_SCRIPT, 20000);
+  if (err) {
+    console.error("[telemetry] disk enrichment check failed to run:", err.message);
+    if (stderr) console.error("[telemetry]   stderr:", stderr.toString());
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(stdout);
+    if (!parsed.ok) {
+      console.error("[telemetry] disk enrichment check completed but reported failure:", parsed.error);
+      return null;
+    }
+    // Select-Object/ConvertTo-Json can collapse a single-element array property the same way the
+    // well-established top-level $net/$disks/$avProducts gotcha does - defensively re-wrap here too.
+    if (Array.isArray(parsed.volumes)) return parsed.volumes;
+    return parsed.volumes ? [parsed.volumes] : [];
+  } catch (e) {
+    console.error("[telemetry] disk enrichment check produced unparseable output:", e.message, "raw:", stdout);
     return null;
   }
 }
@@ -3372,22 +3597,30 @@ async function runBackendCycle() {
   }
 
   // Real Windows Update checks (software updates + BIOS/system firmware updates + domain-join/
-  // MDM status + license/activation status), on their own slower WINDOWS_UPDATE_CHECK_INTERVAL_MS
-  // cadence (see that constant's and runWindowsUpdateCheck's/runBiosFirmwareUpdateCheck's/
-  // runDomainMdmCheck's/runWindowsLicenseCheck's own comments for why). Unlike the hardware-check/
-  // snapshot/prediction blocks above, this is NOT gated on `entitlement` - whether this real
-  // machine has pending updates, is domain/MDM-managed, or is licensed is a pure local OS fact,
-  // unrelated to Cloud Command Center enrollment. Run together (Promise.all) on the same shared
-  // timer - runDomainMdmCheck is cheap/local (dsregcmd, no network) and runWindowsLicenseCheck is
-  // genuinely slow (~42s, WMI enumerating ~60 decoy license rows), but neither needs sub-hourly
-  // freshness, so both piggyback on the existing cadence rather than inventing new timers.
+  // MDM status + license/activation status + driver versions + fingerprint-sensor presence + TPM/
+  // BitLocker fallback + disk model/serial enrichment), on their own slower
+  // WINDOWS_UPDATE_CHECK_INTERVAL_MS cadence (see that constant's and each run*Check function's
+  // own comments for why). Unlike the hardware-check/snapshot/prediction blocks above, this is
+  // NOT gated on `entitlement` - whether this real machine has pending updates, is domain/MDM-
+  // managed, is licensed, or what drivers it has is a pure local OS fact, unrelated to Cloud
+  // Command Center enrollment. Run together (Promise.all) on the same shared timer - none of
+  // these eight needs sub-hourly freshness, even the genuinely slow ones (license ~42s, driver
+  // versions ~5.5-5.9s, TPM/BitLocker fallback ~5s each), so all piggyback on the existing cadence
+  // rather than inventing new timers. Real Measure-Command breakdown that motivated this move:
+  // Win32_PnPSignedDriver ~5.5-5.9s, Get-BitLockerVolume ~5.3-5.6s, Win32_Tpm ~5.0s, disk
+  // model/serial enrichment ~1.3-2.2s, Win32_PnPEntity fingerprint check ~0.75-0.83s - together
+  // over half of get-telemetry.ps1's own ~27s baseline against its 30s script timeout.
   if (Date.now() - lastWindowsUpdateCheckAt >= WINDOWS_UPDATE_CHECK_INTERVAL_MS) {
     lastWindowsUpdateCheckAt = Date.now();
-    const [softwareResult, biosResult, domainMdmResult, licenseResult] = await Promise.all([
+    const [softwareResult, biosResult, domainMdmResult, licenseResult, driverVersionsResult, fingerprintResult, tpmBitlockerResult, diskEnrichmentResult] = await Promise.all([
       withTimeout(runWindowsUpdateCheck(), WINDOWS_UPDATE_CHECK_TIMEOUT_MS, "Windows Update check"),
       withTimeout(runBiosFirmwareUpdateCheck(), WINDOWS_UPDATE_CHECK_TIMEOUT_MS, "BIOS firmware update check"),
       withTimeout(runDomainMdmCheck(), WINDOWS_UPDATE_CHECK_TIMEOUT_MS, "domain/MDM status check"),
       withTimeout(runWindowsLicenseCheck(), WINDOWS_UPDATE_CHECK_TIMEOUT_MS, "Windows license check"),
+      withTimeout(runDriverVersionsCheck(), WINDOWS_UPDATE_CHECK_TIMEOUT_MS, "driver versions check"),
+      withTimeout(runFingerprintSensorCheck(), WINDOWS_UPDATE_CHECK_TIMEOUT_MS, "fingerprint sensor check"),
+      withTimeout(runTpmBitlockerFallbackCheck(), WINDOWS_UPDATE_CHECK_TIMEOUT_MS, "TPM/BitLocker fallback check"),
+      withTimeout(runDiskEnrichmentCheck(), WINDOWS_UPDATE_CHECK_TIMEOUT_MS, "disk enrichment check"),
     ]);
     if (softwareResult) {
       windowsUpdateState = softwareResult;
@@ -3404,6 +3637,22 @@ async function runBackendCycle() {
     if (licenseResult) {
       windowsLicenseState = licenseResult;
       console.log(`[telemetry] Windows license check: status=${licenseResult.licenseStatus} family=${licenseResult.licenseFamily} channel=${licenseResult.productKeyChannel}`);
+    }
+    if (driverVersionsResult) {
+      driverVersionsState = driverVersionsResult;
+      console.log("[telemetry] driver versions check: completed");
+    }
+    if (fingerprintResult) {
+      fingerprintSensorState = fingerprintResult;
+      console.log(`[telemetry] fingerprint sensor check: present=${fingerprintResult.present}`);
+    }
+    if (tpmBitlockerResult) {
+      tpmBitlockerFallbackState = tpmBitlockerResult;
+      console.log(`[telemetry] TPM/BitLocker fallback check: tpm=${tpmBitlockerResult.tpm ? "present" : "null"} bitlockerStatus=${tpmBitlockerResult.bitlockerStatus ?? "null"}`);
+    }
+    if (diskEnrichmentResult) {
+      diskEnrichmentState = diskEnrichmentResult;
+      console.log(`[telemetry] disk enrichment check: ${diskEnrichmentResult.length} volume(s)`);
     }
   }
 }
@@ -3427,17 +3676,21 @@ async function backendPollLoop() {
   }
 }
 
-// Originally measured at ~18-20s (Get-BitLockerVolume alone ~5s, Get-NetIPAddress ~1.9s,
-// Get-Counter ~1.6s, the Win32_* CIM batch ~2.4s, plus cold module-autoload overhead) -
-// comfortably past the old 15s timeout, which is why every cycle was being killed back then.
-// Re-measured directly against the live server under its actual steady-state operation
-// (continuous 5s-interval polling): 7 consecutive real cycles all landed at ~6.2-6.6s, not
-// 18-20s - a one-off standalone Measure-Command run right after, while the live server kept
-// polling concurrently, came back at 17.1s, most likely because that concurrent invocation
-// contended with the live server's own simultaneous WMI queries (same classes, same WMI
-// service) rather than reflecting genuine standalone cost. Either way, 30s comfortably covers
-// both the fast warm-provider steady state and a slower/contended/cold-start case.
-const SCRIPT_TIMEOUT_MS = 30000;
+// Re-profiled directly (Measure-Command against each real query individually, 3 consecutive
+// runs, plus cross-checked against real consecutive updatedAt deltas from the live deployed
+// server - 24.1s between real cycles observed directly): today's real baseline is ~27-30s, not
+// the ~6-7s an older version of this comment used to claim - whatever conditions produced that
+// faster reading, they don't reproduce today, and three independent measurement methods
+// (standalone Measure-Command, `time` against the whole script, live production cycle deltas)
+// now agree closely enough to trust. The real breakdown (before the hourly-cadence moves this
+// same commit makes - see PNP_DRIVER_VERSIONS_SCRIPT/TPM_BITLOCKER_FALLBACK_SCRIPT/
+// DISK_ENRICHMENT_SCRIPT/FINGERPRINT_SENSOR_SCRIPT's own comments): Win32_PnPSignedDriver
+// ~5.5-5.9s, Get-BitLockerVolume ~5.3-5.6s, Win32_Tpm ~5.0s, disk model/serial enrichment
+// ~1.3-2.2s, Win32_PnPEntity fingerprint check ~0.75-0.83s - over half the total, now moved off
+// this path. 45s (up from 30s) is deliberate defense-in-depth on top of those moves, not a
+// substitute for them - real-world WMI provider variance (a colder day, a busier machine) could
+// still occasionally push even the trimmed path higher than expected.
+const SCRIPT_TIMEOUT_MS = 45000;
 
 function execTelemetryScript() {
   return new Promise((resolve) => {
@@ -3878,6 +4131,31 @@ async function collect() {
     parsed.biosFirmwareUpdate = biosFirmwareUpdateState;
     parsed.domainMdm = domainMdmState;
     parsed.windowsLicense = windowsLicenseState;
+    // Direct replace - get-telemetry.ps1 no longer queries either of these itself (moved to the
+    // hourly cadence above), so there's nothing on the fast path to preserve.
+    parsed.driverVersions = driverVersionsState;
+    parsed.fingerprintSensorPresent = fingerprintSensorState?.present ?? null;
+    // TPM/BitLocker: a FALLBACK only, applied AFTER mergeRustData above already ran - rust's own
+    // per-cycle, already-elevated read takes priority whenever it succeeds. Only fills in from the
+    // hourly PS-side check when rust hasn't supplied a value this cycle (rust unavailable, or this
+    // specific field came back null from it) - see tpmBitlockerFallbackState's own comment for why
+    // this exists at all instead of just trusting rust alone.
+    if (parsed.tpm == null) parsed.tpm = tpmBitlockerFallbackState?.tpm ?? null;
+    if (parsed.bitlockerStatus == null) parsed.bitlockerStatus = tpmBitlockerFallbackState?.bitlockerStatus ?? null;
+    // Additive overlay by drive letter, not a wholesale replace - parsed.logicalDisks is still the
+    // FRESH 5s-cadence array (real-time Size/FreeSpace) from get-telemetry.ps1 itself;
+    // diskEnrichmentState is the hourly-cached model/serial lookup. Same "overlay by key" pattern
+    // mergeRustData already uses for GPU, for the same reason: two independently-cadenced sources
+    // describing the same real entities need to be joined by a stable key, not one replacing the
+    // other outright.
+    if (Array.isArray(parsed.logicalDisks) && Array.isArray(diskEnrichmentState)) {
+      const enrichByLetter = new Map(diskEnrichmentState.map((e) => [e.letter, e]));
+      parsed.logicalDisks = parsed.logicalDisks.map((d) => {
+        const letterMatch = typeof d?.DeviceID === "string" ? d.DeviceID.match(/^([A-Za-z]):/) : null;
+        const enrich = letterMatch ? enrichByLetter.get(letterMatch[1]) : null;
+        return enrich ? { ...d, DiskModel: enrich.diskModel, DiskSerial: enrich.diskSerial } : d;
+      });
+    }
     cache = { data: parsed, error: null, updatedAt: new Date().toISOString() };
 
     // Fire-and-forget (not awaited) - see postLiveStatus's own comment on why this must never
