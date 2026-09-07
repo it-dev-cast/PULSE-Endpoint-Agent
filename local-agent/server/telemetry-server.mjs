@@ -666,58 +666,117 @@ function registerFailureMessage(err) {
   return `${msg} (${BACKEND_URL})`;
 }
 
+// One real attempt to turn DEVICE_CREDENTIALS_PATH into usable {id, apiKey} credentials.
+// Returns one of three distinct outcomes - deliberately not collapsed into a single
+// true/false/null, because "absent" and "broken" below must never be treated the same way (see
+// loadOrRegisterDevice's own comment on why that distinction is the entire point of this split):
+//   - { status: "ok", credentials, wasLegacyPlaintext } - real, usable credentials found.
+//   - { status: "absent" } - ENOENT - the expected, ordinary first-run case.
+//   - { status: "broken", error } - the file EXISTS but couldn't be turned into real credentials
+//     (a file-level read error, JSON-parse failure, DPAPI decrypt failure, or a successfully
+//     decrypted-but-missing-id/apiKey result) - a genuine failure, not "never enrolled."
+async function attemptReadCredentials(dpapiTimeoutMs) {
+  let raw;
+  try {
+    raw = fs.readFileSync(DEVICE_CREDENTIALS_PATH, "utf8");
+  } catch (e) {
+    if (e.code === "ENOENT") return { status: "absent" };
+    return { status: "broken", error: e };
+  }
+
+  let parsed;
+  let wasLegacyPlaintext = false;
+  try {
+    // Legacy pre-DPAPI format: the raw file content IS valid JSON directly. A real DPAPI-
+    // protected blob (base64 of encrypted bytes) is never valid JSON on its own, so this check
+    // alone is a reliable, self-describing migration gate - no separate persisted "migration
+    // done" flag needed (unlike the Tauri app's ruleId-dedup alert migration, which needed one
+    // because its data stayed validly-shaped whether migrated or not).
+    parsed = JSON.parse(raw);
+    wasLegacyPlaintext = true;
+  } catch {
+    // Not directly-parseable JSON - assume it's already a real DPAPI-protected blob from a
+    // previous run and decrypt it. A genuine decrypt failure (corrupted file, moved to a
+    // different machine where LocalMachine-scope DPAPI keys don't match, or - found live - a
+    // spawned powershell.exe timing out because collect()'s own get-telemetry.ps1 spawn is
+    // racing it for resources at the exact same startup moment) is real, not "never enrolled."
+    try {
+      const decrypted = await unprotectCredentials(raw, dpapiTimeoutMs);
+      parsed = JSON.parse(decrypted);
+    } catch (e) {
+      return { status: "broken", error: e };
+    }
+  }
+
+  if (!parsed?.id || !parsed?.apiKey) {
+    return { status: "broken", error: new Error("file parsed but is missing id/apiKey") };
+  }
+  return { status: "ok", credentials: parsed, wasLegacyPlaintext };
+}
+
+// Retried ONLY for the "broken" outcome above - "absent" never retries (nothing will make a
+// genuinely-missing file appear a moment later) and "ok" has nothing to retry. One retry (two
+// attempts total), found live to be the right shape for the one real cause identified so far:
+// unprotectCredentials spawns its own powershell.exe, and collect()'s own get-telemetry.ps1 spawn
+// can occupy the exact same startup moment (measured directly at ~10-11s under real elevation) -
+// long enough to plausibly blow the first attempt's 15s DPAPI timeout. The retry gets
+// DPAPI_RETRY_TIMEOUT_MS (double the default) rather than repeating the same tight window it may
+// have just lost the same race against, and CREDENTIAL_RETRY_DELAY_MS gives that other spawn a
+// real chance to actually clear first instead of retrying straight into the same contention.
+const CREDENTIAL_RETRY_DELAY_MS = 2000;
+const DPAPI_RETRY_TIMEOUT_MS = 30000;
+
+async function loadExistingCredentialsWithRetry() {
+  const first = await attemptReadCredentials(undefined); // undefined - execPowerShellCommand's own 15s default
+  if (first.status !== "broken") return first;
+  console.warn(`[telemetry] ${DEVICE_CREDENTIALS_PATH} exists but couldn't be read (${first.error.message}) - retrying once before giving up.`);
+  await new Promise((resolve) => setTimeout(resolve, CREDENTIAL_RETRY_DELAY_MS));
+  const retry = await attemptReadCredentials(DPAPI_RETRY_TIMEOUT_MS);
+  // Both attempts' real errors preserved (not just the retry's) - they can genuinely differ (e.g.
+  // first a timeout, then a real decrypt failure), and whoever reads the eventual audit event
+  // should see the full picture, not just whichever attempt happened to run last.
+  if (retry.status === "broken") {
+    retry.error = new Error(`first attempt: ${first.error.message}; retry attempt: ${retry.error.message}`);
+  }
+  return retry;
+}
+
 // Reads DEVICE_CREDENTIALS_PATH if it already holds a real id+apiKey; otherwise registers this
 // device with backend/ (POST /v1/devices/register) using hostname plus a stable machine id and
 // persists the result. Only ever called when deviceCredentials is still null, so a device already
 // enrolled is never re-registered - re-registering on every restart would silently mint a new,
 // orphaned device row in backend/'s database every time this process starts.
 async function loadOrRegisterDevice() {
-  try {
-    const raw = fs.readFileSync(DEVICE_CREDENTIALS_PATH, "utf8");
-    let parsed;
-    let wasLegacyPlaintext = false;
-    try {
-      // Legacy pre-DPAPI format: the raw file content IS valid JSON directly. A real DPAPI-
-      // protected blob (base64 of encrypted bytes) is never valid JSON on its own, so this
-      // check alone is a reliable, self-describing migration gate - no separate persisted
-      // "migration done" flag needed (unlike the Tauri app's ruleId-dedup alert migration, which
-      // needed one because its data stayed validly-shaped whether migrated or not).
-      parsed = JSON.parse(raw);
-      wasLegacyPlaintext = true;
-    } catch {
-      // Not directly-parseable JSON - assume it's already a real DPAPI-protected blob from a
-      // previous run and decrypt it. A genuine decrypt failure (corrupted file, moved to a
-      // different machine where LocalMachine-scope DPAPI keys don't match) throws here and is
-      // caught by the outer catch below, logged, and treated the same as a missing file -
-      // falling through to fresh registration rather than crashing.
-      const decrypted = await unprotectCredentials(raw);
-      parsed = JSON.parse(decrypted);
-    }
+  const result = await loadExistingCredentialsWithRetry();
 
-    if (parsed?.id && parsed?.apiKey) {
-      if (wasLegacyPlaintext) {
-        console.warn(`[telemetry] ${DEVICE_CREDENTIALS_PATH} is in the old plaintext format - encrypting it in place.`);
-        try {
-          const protectedBlob = await protectCredentials(JSON.stringify(parsed, null, 2));
-          fs.writeFileSync(DEVICE_CREDENTIALS_PATH, protectedBlob, { mode: 0o600 });
-          console.log(`[telemetry] migrated ${DEVICE_CREDENTIALS_PATH} to DPAPI-encrypted format.`);
-        } catch (migrateErr) {
-          // Non-fatal for this cycle - the plaintext credentials we already parsed are still
-          // real and usable now; migration just retries on the next restart instead of blocking
-          // this one on a local disk/PowerShell hiccup.
-          console.warn(`[telemetry] failed to encrypt ${DEVICE_CREDENTIALS_PATH} in place (${migrateErr.message}) - will retry on next restart; continuing with the plaintext credentials for now.`);
-        }
+  if (result.status === "ok") {
+    const { credentials: parsed, wasLegacyPlaintext } = result;
+    if (wasLegacyPlaintext) {
+      console.warn(`[telemetry] ${DEVICE_CREDENTIALS_PATH} is in the old plaintext format - encrypting it in place.`);
+      try {
+        const protectedBlob = await protectCredentials(JSON.stringify(parsed, null, 2));
+        fs.writeFileSync(DEVICE_CREDENTIALS_PATH, protectedBlob, { mode: 0o600 });
+        console.log(`[telemetry] migrated ${DEVICE_CREDENTIALS_PATH} to DPAPI-encrypted format.`);
+      } catch (migrateErr) {
+        // Non-fatal for this cycle - the plaintext credentials we already parsed are still
+        // real and usable now; migration just retries on the next restart instead of blocking
+        // this one on a local disk/PowerShell hiccup.
+        console.warn(`[telemetry] failed to encrypt ${DEVICE_CREDENTIALS_PATH} in place (${migrateErr.message}) - will retry on next restart; continuing with the plaintext credentials for now.`);
       }
-      console.log(`[telemetry] reusing existing device credentials (id=${parsed.id}) from ${DEVICE_CREDENTIALS_PATH} - not re-registering.`);
-      return parsed;
     }
-    console.warn(`[telemetry] ${DEVICE_CREDENTIALS_PATH} exists but is missing id/apiKey - re-registering.`);
-  } catch (e) {
-    if (e.code !== "ENOENT") {
-      console.warn(`[telemetry] failed to read/decrypt ${DEVICE_CREDENTIALS_PATH} (${e.message}) - re-registering.`);
-    }
-    // ENOENT (file doesn't exist yet) is the expected first-run case - falls through to
-    // registration silently, no warning needed for that specific case.
+    console.log(`[telemetry] reusing existing device credentials (id=${parsed.id}) from ${DEVICE_CREDENTIALS_PATH} - not re-registering.`);
+    return parsed;
+  }
+
+  // "absent" (ENOENT) is the expected first-run case - falls through to registration silently,
+  // same as before. "broken" survived a real retry and is genuinely a failure, not a first run -
+  // registering fresh is still the only option (this device has no other way to get a working
+  // identity), but it's flagged via the transient marker below so the two call sites of this
+  // function can fire a real, durable backend event once deviceCredentials is actually set -
+  // this is the fix for the exact silent-identity-churn instability found live tonight.
+  const existingFileWasBroken = result.status === "broken";
+  if (existingFileWasBroken) {
+    console.error(`[telemetry] ${DEVICE_CREDENTIALS_PATH} exists but could not be read even after a retry (${result.error.message}) - registering a NEW device identity. This is NOT the expected first-run case.`);
   }
 
   try {
@@ -747,12 +806,36 @@ async function loadOrRegisterDevice() {
     const protectedBlob = await protectCredentials(JSON.stringify(credentials, null, 2));
     fs.writeFileSync(DEVICE_CREDENTIALS_PATH, protectedBlob, { mode: 0o600 });
     console.log(`[telemetry] registered this device with Cloud Command Center (id=${credentials.id}, hostname=${credentials.hostname}) - credentials saved to ${DEVICE_CREDENTIALS_PATH} (DPAPI-encrypted).`);
+    // Transient, in-memory-only marker - added after the file write above already ran with the
+    // clean {id,apiKey,hostname} shape, so it's never persisted to disk. See
+    // reportIfRecoveredFromUnreadableFile's own comment for why this can't just call logEvent
+    // directly from in here.
+    if (existingFileWasBroken) credentials._recoveredFromUnreadableFile = true;
     return credentials;
   } catch (e) {
     lastRegisterError = registerFailureMessage(e);
     // Not logged here - runBackendCycle's transition-only logging (lastBackendOutcome) covers
     // this so a backend that's simply not running yet doesn't spam a warning every 60s.
     return null;
+  }
+}
+
+// Fires a real, durable, dashboard/audit-log-visible event the moment a re-registration caused
+// by a genuinely broken (not just absent) credentials file actually completes - the fix for the
+// exact instability found live tonight: this case used to be silent (a console.warn nobody in
+// production ever sees, since run-hidden.vbs discards this process's stdout/stderr). Can't be
+// called from inside loadOrRegisterDevice itself - logEvent reads the module-level
+// deviceCredentials, which isn't assigned until the caller does
+// `deviceCredentials = await loadOrRegisterDevice()` - so every call site of that function calls
+// this immediately after, instead.
+function reportIfRecoveredFromUnreadableFile() {
+  if (deviceCredentials?._recoveredFromUnreadableFile) {
+    logEvent(
+      "device-identity-recovered-as-new",
+      `This device's stored credentials could not be read even after a retry and it re-registered under a new ID (${deviceCredentials.id}) - the previous identity is now orphaned. Check local telemetry-server logs on this device for the original read/decrypt failure.`,
+      "critical",
+    );
+    delete deviceCredentials._recoveredFromUnreadableFile;
   }
 }
 
@@ -995,6 +1078,7 @@ async function handleBackendUrlUpdate(req, res) {
     if (!deviceCredentials) {
       lastRegisterError = null;
       deviceCredentials = await loadOrRegisterDevice();
+      reportIfRecoveredFromUnreadableFile();
     }
     res.writeHead(200);
     res.end(JSON.stringify(enrollmentPayload()));
@@ -1356,9 +1440,13 @@ async function protectCredentials(json) {
   return result.blob;
 }
 
-async function unprotectCredentials(blobB64) {
+// timeoutMs: undefined uses execPowerShellCommand's own 15s default (the common, fast-path
+// case) - loadOrRegisterDevice's retry passes DPAPI_RETRY_TIMEOUT_MS (30s) explicitly instead of
+// repeating the same tight window a first attempt may have just lost a real startup-contention
+// race against (see that function's own comment on the concurrent get-telemetry.ps1 spawn).
+async function unprotectCredentials(blobB64, timeoutMs) {
   const script = DPAPI_UNPROTECT_SCRIPT_TEMPLATE.replace("__INPUT_B64__", blobB64.trim());
-  const { err, stdout, stderr } = await execPowerShellCommand(script);
+  const { err, stdout, stderr } = await execPowerShellCommand(script, timeoutMs);
   if (err) throw new Error(`DPAPI unprotect failed to run: ${err.message}${stderr ? ` (stderr: ${stderr})` : ""}`);
   let result;
   try {
@@ -3474,6 +3562,7 @@ async function runBackendCycle() {
 
   if (!deviceCredentials) {
     deviceCredentials = await loadOrRegisterDevice();
+    reportIfRecoveredFromUnreadableFile();
   }
 
   if (!deviceCredentials) {
