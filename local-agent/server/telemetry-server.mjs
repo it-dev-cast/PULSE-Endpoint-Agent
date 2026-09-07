@@ -1064,6 +1064,36 @@ async function handleRemoteSessionCreate(req, res) {
   }
 }
 
+// PRD §30 Remote Assist hardening - proxies the device-authenticated POST .../remote-sessions/
+// {id}/end (the real, instant Stop Sharing action - see backend/remote_session.go's own
+// endImmediately/handleEndRemoteSessionAsDevice comments), same device-API-key-never-reaches-the-
+// browser convention as handleRemoteSessionCreate above.
+async function handleRemoteSessionEndProxy(sessionId, res) {
+  if (!deviceCredentials) {
+    res.writeHead(503);
+    res.end(JSON.stringify({ error: "this device is not yet enrolled with the Cloud Command Center" }));
+    return;
+  }
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), BACKEND_REQUEST_TIMEOUT_MS);
+  try {
+    const backendRes = await fetch(`${BACKEND_URL}/v1/remote-sessions/${encodeURIComponent(sessionId)}/end`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${deviceCredentials.apiKey}` },
+      signal: controller.signal,
+    });
+    const body = await backendRes.text();
+    res.writeHead(backendRes.status);
+    res.end(body);
+  } catch (err) {
+    console.error("[telemetry] remote-session end proxy failed:", err.message);
+    res.writeHead(502);
+    res.end(JSON.stringify({ error: "backend unreachable" }));
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
 // PRD §30 Remote Assist hardening - proxies the device-authenticated GET /v1/turn-credentials so
 // the browser/webview (which never holds this device's real API key) can get real, time-limited
 // TURN relay credentials without that key ever reaching it - same device-auth-proxy pattern as
@@ -4228,6 +4258,14 @@ const server = createServer((req, res) => {
     if (req.url === "/api/telemetry") {
       res.writeHead(200);
       res.end(JSON.stringify(cache));
+      return;
+    }
+
+    // Checked BEFORE the generic /api/remote-session startsWith below, which would otherwise
+    // wrongly swallow this more specific path too (it matches on prefix, not exact route).
+    const endMatch = req.url?.match(/^\/api\/remote-session\/([^/]+)\/end$/);
+    if (endMatch && req.method === "POST") {
+      handleRemoteSessionEndProxy(endMatch[1], res);
       return;
     }
 

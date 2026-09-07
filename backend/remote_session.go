@@ -148,6 +148,39 @@ func (s *remoteSessionStore) remove(id string) {
 	s.mu.Unlock()
 }
 
+// endImmediately is the deliberate-end path, bypassing sessionRemovalGracePeriod entirely -
+// unlike a plain dropped connection (which might just be a network blip, hence the grace period),
+// a Stop Sharing/Disconnect click is an explicit, unambiguous "this is over," so there's nothing
+// to wait 25s for. Every connected peer is told why (endedBy: "customer" or "operator", whichever
+// side didn't click the button) before being closed, so the other side's UI can show a real
+// "they ended it" state instead of its WebSocket just going silent.
+//
+// Note: the peer whose connection we .Close() here is also running handleRemoteSessionWS's own
+// read loop in a separate goroutine - closing it unblocks that goroutine's ReadMessage, which
+// runs its own deferred cleanup (delete from sess.peers, and if that leaves zero peers, arm a
+// fresh removalTimer). That's harmless, not a race worth preventing: store.remove below has
+// already evicted this session from the store's map, so that stray timer firing 25s later just
+// no-ops on an absent key.
+func (s *remoteSessionStore) endImmediately(id string, endedBy string) bool {
+	sess, ok := s.get(id)
+	if !ok {
+		return false
+	}
+	sess.mu.Lock()
+	if sess.removalTimer != nil {
+		sess.removalTimer.Stop()
+		sess.removalTimer = nil
+	}
+	endedMsg, _ := json.Marshal(map[string]string{"type": "session-ended", "endedBy": endedBy})
+	for peer := range sess.peers {
+		_ = peer.WriteMessage(websocket.TextMessage, endedMsg)
+		_ = peer.Close()
+	}
+	sess.mu.Unlock()
+	s.remove(id)
+	return true
+}
+
 // sweepExpired is the fallback for a session whose peers vanished without a clean WebSocket
 // close (e.g. a crashed tab, a lost network) - handleRemoteSessionWS's own defer already
 // removes a session the instant it reaches zero peers via a normal close, so this only ever
@@ -437,5 +470,49 @@ func handleRemoteSessionExists(store *remoteSessionStore) http.HandlerFunc {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"exists": true})
+	}
+}
+
+// handleEndRemoteSessionAsDevice is the customer's real "Stop Sharing" endpoint - device-
+// authenticated (anyDeviceAuthMiddleware, same as handleCreateRemoteSession), and additionally
+// checked against the session's own deviceID so a device can only ever end its own session, never
+// one belonging to some other enrolled device that happens to know/guess its ID.
+func handleEndRemoteSessionAsDevice(store *remoteSessionStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := chi.URLParam(r, "id")
+		sess, ok := store.get(id)
+		if !ok {
+			writeError(w, http.StatusNotFound, "session not found")
+			return
+		}
+		device, ok := r.Context().Value(deviceContextKey).(*Device)
+		if !ok || device.ID != sess.deviceID {
+			writeError(w, http.StatusForbidden, "not your session")
+			return
+		}
+		store.endImmediately(id, "customer")
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+// handleEndRemoteSessionAsAdmin is the operator's real Disconnect endpoint - admin-authenticated,
+// tenant-scoped the same way GET .../remote-sessions already is (an admin can only end a session
+// within their own tenant, checked against the session's own tenantID rather than trusting the
+// URL's {id} alone).
+func handleEndRemoteSessionAsAdmin(store *remoteSessionStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		tenantID := chi.URLParam(r, "id")
+		sessionID := chi.URLParam(r, "sessionId")
+		sess, ok := store.get(sessionID)
+		if !ok {
+			writeError(w, http.StatusNotFound, "session not found")
+			return
+		}
+		if sess.tenantID != tenantID {
+			writeError(w, http.StatusForbidden, "session not in this tenant")
+			return
+		}
+		store.endImmediately(sessionID, "operator")
+		w.WriteHeader(http.StatusNoContent)
 	}
 }

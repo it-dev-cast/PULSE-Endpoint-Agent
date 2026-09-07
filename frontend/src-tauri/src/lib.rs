@@ -87,6 +87,21 @@ fn update_unread_count(
   refresh_tray_tooltip(&app, &tray_status);
 }
 
+// PRD §30 Remote Assist hardening - called from ScreenSharePOC.tsx the instant a join-request
+// arrives, so it's impossible to miss even if the window is minimized to tray. Reuses
+// show_and_focus_main_window rather than duplicating it - one real implementation, per that
+// function's own comment. request_user_attention is the fallback for the case Windows sometimes
+// blocks a background process from stealing foreground focus outright (a real, documented OS
+// behavior, not a bug in show()/set_focus() above) - Critical flashes the taskbar icon until the
+// window is actually focused, so there's still a real signal even then.
+#[tauri::command]
+fn request_remote_assist_attention(app: tauri::AppHandle) {
+  show_and_focus_main_window(&app);
+  if let Some(window) = app.get_webview_window("main") {
+    let _ = window.request_user_attention(Some(tauri::UserAttentionType::Critical));
+  }
+}
+
 // Real TrayIcon::set_visible - Settings' "Show in Tray" toggle. Note a known upstream Tauri v2
 // issue on Windows (tauri-apps/tauri#10150): hiding works reliably, but re-showing after a hide
 // doesn't always re-expose the icon. Real, not faked, but disclosed here rather than assumed
@@ -148,6 +163,26 @@ fn create_remote_session(mode: String) -> Result<serde_json::Value, String> {
   serde_json::from_str(&text).map_err(|e| e.to_string())
 }
 
+// The real, instant Stop Sharing action (see backend/remote_session.go's endImmediately) - same
+// CORS-preflight-avoidance reason create_remote_session above talks to 127.0.0.1:4317 from Rust
+// rather than the WebView doing it directly. No response body is expected on success (backend
+// returns 204), so this only needs to report whether the call succeeded.
+#[tauri::command]
+fn end_remote_session(session_id: String) -> Result<(), String> {
+  let url = format!("http://127.0.0.1:4317/api/remote-session/{session_id}/end");
+  let result = ureq::post(&url)
+    .timeout(std::time::Duration::from_secs(10))
+    .call();
+  match result {
+    Ok(_) => Ok(()),
+    Err(ureq::Error::Status(_code, resp)) => {
+      let text = resp.into_string().unwrap_or_default();
+      Err(if text.is_empty() { "failed to end the session".into() } else { text })
+    }
+    Err(e) => Err(format!("Can't reach local telemetry on port 4317: {e}")),
+  }
+}
+
 // PRD §30 Remote Assist hardening - real, time-limited TURN relay credentials (see
 // backend/turn.go's own comment). A plain GET with no body doesn't trigger the same CORS
 // preflight create_remote_session's own comment describes for POST, but this command exists
@@ -193,8 +228,10 @@ pub fn run() {
       update_unread_count,
       set_tray_visible,
       create_remote_session,
+      end_remote_session,
       get_turn_credentials,
-      log_remote_assist_event
+      log_remote_assist_event,
+      request_remote_assist_attention
     ])
     .setup(|app| {
       if cfg!(debug_assertions) {

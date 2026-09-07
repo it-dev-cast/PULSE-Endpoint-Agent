@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type RefObject } from "react";
 import {
   Monitor, Mic, MicOff, MessageCircle, Send, Paperclip, Play, Pause,
   Copy, Check, RotateCcw, AlertTriangle, Download, ShieldCheck, ShieldAlert,
-  Share2, Eye, Headphones, Wifi, CheckCircle2, Clock,
+  Share2, Eye, Headphones, Wifi, CheckCircle2, Clock, Square,
 } from "lucide-react";
 import { useApp } from "../context/AppContext";
 import { CLPAPage, CLPACard, CLPABadge } from "../components/shared/clpa";
@@ -198,6 +198,28 @@ async function createRemoteSession(mode: "screen" | "voice" | "chat"): Promise<{
     throw new Error(body?.error || `Failed to create a real signaling session (HTTP ${res.status}).`);
   }
   return body;
+}
+
+// The real, instant Stop Sharing call - proxies to the backend's device-authenticated POST
+// .../remote-sessions/{id}/end (see backend/remote_session.go's endImmediately), same
+// browser-never-holds-the-API-key convention as createRemoteSession above. Best-effort by
+// design - see stopSharing's own comment on why a failed call here still lets local teardown
+// proceed; this never throws past a console warning.
+async function endRemoteSessionOnBackend(sessionId: string): Promise<void> {
+  try {
+    if (await isRunningInTauri()) {
+      const { invoke } = await import("@tauri-apps/api/core");
+      await invoke("end_remote_session", { sessionId });
+      return;
+    }
+    try {
+      await fetch(`/api/remote-session/${encodeURIComponent(sessionId)}/end`, { method: "POST" });
+    } catch {
+      await fetch(`http://127.0.0.1:4317/api/remote-session/${encodeURIComponent(sessionId)}/end`, { method: "POST" });
+    }
+  } catch (e) {
+    console.warn("[remote-assist] failed to notify the backend this session ended:", e);
+  }
 }
 
 async function openSessionSocket(sessionId: string): Promise<WebSocket> {
@@ -885,7 +907,12 @@ export default function ScreenSharePOC() {
     setPendingFileOffer(null);
   }
 
-  function resetAll() {
+  // The real local teardown - shared by the generic Reset button (resetAll, unchanged below) and
+  // the session-scoped Stop Sharing button (stopSharing) so there's exactly one implementation of
+  // "close everything and go back to idle," not two copies that could silently drift apart. The
+  // only difference between the two call sites is what happens BEFORE this runs (stopSharing
+  // notifies the backend first - see its own comment).
+  function teardownLocalState() {
     // PRD §30 Remote Assist hardening - real "session ended" audit event with a real computed
     // duration, measured from when an operator actually joined (operatorJoinedAtRef, set in
     // approveJoinRequest) - not from session creation, since "duration" means how long help was
@@ -948,6 +975,29 @@ export default function ScreenSharePOC() {
     });
   }
 
+  // The generic Reset button - unchanged behavior, local-only, no backend notification. Kept
+  // distinct from stopSharing below rather than merged into one button/handler: this one is
+  // always present regardless of session state, and its whole point is "clear this panel,"
+  // not "tell the other side I'm ending a live session" (see stopSharing's own comment).
+  function resetAll() {
+    teardownLocalState();
+  }
+
+  // PRD §30 Remote Assist hardening - the real Stop Sharing action: unlike resetAll/Reset above,
+  // this tells the backend the session is deliberately over BEFORE tearing down locally, so it's
+  // removed immediately (endImmediately, bypassing sessionRemovalGracePeriod's 25s) rather than
+  // relying on the WebSocket close alone - the exact gap found live in the operator's own
+  // Disconnect button. endRemoteSessionOnBackend is best-effort by design (catches and warns
+  // internally, never throws) - a failed notification (backend unreachable, session already
+  // gone) must never block the real local teardown that follows it regardless; the customer's
+  // own screen/mic need to stop either way.
+  async function stopSharing() {
+    if (sessionId) {
+      await endRemoteSessionOnBackend(sessionId);
+    }
+    teardownLocalState();
+  }
+
   // Clean up the real capture/connection/socket on unmount so a screen-share indicator doesn't
   // keep running in the browser after navigating away from this POC.
   useEffect(() => {
@@ -988,7 +1038,7 @@ export default function ScreenSharePOC() {
       reconnectBackoffRef.current = SIGNAL_INITIAL_RETRY_MS;
       setShareStatus((prev) => (prev === "reconnecting" ? "waiting-for-peer" : prev));
     };
-    ws.onmessage = (event) => {
+    ws.onmessage = async (event) => {
       let msg: SignalMessage;
       try {
         msg = JSON.parse(event.data);
@@ -997,6 +1047,23 @@ export default function ScreenSharePOC() {
       }
       if (msg.type === "join-request") {
         setPendingJoinRequest(true);
+        // Logged unconditionally, the instant this arrives - not just from approveJoinRequest/
+        // denyJoinRequest, which only ever fired once a human had already reacted to the banner.
+        // Without this, a join-request nobody saw (window minimized, banner missed) left no
+        // trace anywhere that it had ever arrived at all.
+        postRealEvent("remote-assist-join-request-received", "An operator requested to join this session - awaiting Approve/Deny.", "info");
+        // Real fix for "the banner rendered into a hidden/minimized window and nobody saw it" -
+        // forces the window forward and, if the OS blocks that outright, flashes the taskbar
+        // icon instead (see request_remote_assist_attention's own comment). Best-effort outside
+        // the Tauri app (e.g. this POC running in a plain browser tab) - nothing to focus there.
+        if (await isRunningInTauri()) {
+          try {
+            const { invoke } = await import("@tauri-apps/api/core");
+            await invoke("request_remote_assist_attention");
+          } catch {
+            // Best-effort - see postRealEvent's own comment on this class of call.
+          }
+        }
       } else if (msg.type === "answer" && msg.sdp) {
         applyAnswer(msg.sdp);
       }
@@ -1614,6 +1681,27 @@ export default function ScreenSharePOC() {
                   >
                     {linkCopied ? <Check size={11} strokeWidth={2.4} /> : <Copy size={11} strokeWidth={2.2} />}
                     {linkCopied ? "Copied" : "Copy Link"}
+                  </button>
+                </div>
+
+                {/* PRD §30 Remote Assist hardening - the customer's own real Stop Sharing action.
+                    Previously the only way to end a live session from this side was the generic,
+                    always-present "Reset" button up in the header - functionally complete (it
+                    already stopped tracks/closed the connection) but not labeled or positioned as
+                    a live-session action, and it never told the backend the session was actually
+                    over (see stopSharing's own comment on the real difference: instant removal
+                    via the backend vs. waiting out the 25s grace period). This whole card only
+                    renders while shareStatus is waiting-for-peer/reconnecting/completing (see the
+                    enclosing condition above) - i.e. exactly the non-idle range where a real
+                    session (and sessionId) actually exists, connected or not - so no separate
+                    state check is needed here. */}
+                <div style={{ marginBottom: 12 }}>
+                  <button
+                    onClick={stopSharing}
+                    className="flex items-center gap-1.5 clpa-focusable"
+                    style={{ padding: "7px 14px", borderRadius: 8, border: "1px solid var(--clpa-critical-wash-border)", background: "var(--clpa-critical-wash)", color: "var(--clpa-critical)", fontSize: 10.5, fontWeight: 700, cursor: "pointer" }}
+                  >
+                    <Square size={12} strokeWidth={2.2} /> Stop Sharing
                   </button>
                 </div>
 

@@ -218,6 +218,10 @@ func main() {
 			// handleCreateRemoteSession), this is the admin-facing read for the initial page
 			// load and for confirming whether a session is still waiting or already connected.
 			r.Get("/tenants/{id}/remote-sessions", handleListTenantRemoteSessions(remoteSessions))
+			// The operator's real, instant Disconnect - bypasses sessionRemovalGracePeriod
+			// entirely (see remote_session.go's own comment on endImmediately) rather than just
+			// closing the dashboard's own WebSocket and waiting 25s for the store to notice.
+			r.Post("/tenants/{id}/remote-sessions/{sessionId}/end", handleEndRemoteSessionAsAdmin(remoteSessions))
 			// PRD §30 Remote Assist hardening - real, time-limited TURN relay credentials for the
 			// dashboard operator side (see turn.go's own comment). Device-side issuance is the
 			// identical handler, registered separately below under anyDeviceAuthMiddleware.
@@ -235,6 +239,10 @@ func main() {
 			r.Use(anyDeviceAuthMiddleware(db))
 			r.Post("/remote-sessions", handleCreateRemoteSession(remoteSessions, liveHub, db))
 			r.Get("/turn-credentials", handleIssueTurnCredentials())
+			// The customer's real, instant Stop Sharing - see handleEndRemoteSessionAsDevice's
+			// own comment. Checked against the caller's own device ID, not just the session ID
+			// alone, so a device can only ever end its own session.
+			r.Post("/remote-sessions/{id}/end", handleEndRemoteSessionAsDevice(remoteSessions))
 		})
 
 		// No auth - the session ID itself is the access control (see handleRemoteSessionWS's
