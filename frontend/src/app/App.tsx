@@ -1215,7 +1215,7 @@ function BatteryCard() {
         </div>
       </div>
 
-      <div className="grid grid-cols-3" style={{ borderTop: "1px solid var(--clpa-divider)", paddingTop: 9 }}>
+      <div className={`grid ${batteryTempC != null ? "grid-cols-3" : "grid-cols-2"}`} style={{ borderTop: "1px solid var(--clpa-divider)", paddingTop: 9 }}>
         <div>
           <div style={{ fontSize: 9, color: "var(--clpa-subtle)" }}>Status</div>
           <div className="flex items-center gap-1">
@@ -1239,14 +1239,14 @@ function BatteryCard() {
             {healthLabel}
           </span>
         </div>
-        <div>
-          <div style={{ fontSize: 9, color: "var(--clpa-subtle)" }}>Temp</div>
-          <div className="flex items-center gap-1">
-            <span style={{ fontSize: 11, color: "var(--clpa-title)", fontWeight: 700 }}>
-              {batteryTempC != null ? `${Math.round(batteryTempC)}°C` : "—"}
-            </span>
+        {batteryTempC != null && (
+          <div>
+            <div style={{ fontSize: 9, color: "var(--clpa-subtle)" }}>Temp</div>
+            <div className="flex items-center gap-1">
+              <span style={{ fontSize: 11, color: "var(--clpa-title)", fontWeight: 700 }}>{Math.round(batteryTempC)}°C</span>
+            </div>
           </div>
-        </div>
+        )}
       </div>
       {batteries.length > 1 && (
         <div className="flex flex-col gap-1" style={{ borderTop: "1px solid var(--clpa-divider)", paddingTop: 8, marginTop: 8 }}>
@@ -1583,6 +1583,22 @@ function ThermalCard() {
       ? { text: "Elevated temperature detected", color: "var(--clpa-warning)" }
       : { text: "All sensors within range", color: "var(--clpa-success-bright)" };
 
+  // Shared between both layout branches below (fan-present two-column vs. fan-absent single
+  // full-width column) so the row markup itself never has to differ between hardware that does
+  // and doesn't expose a fan sensor.
+  const tempRows = temps.map((t, i) => (
+    <div key={i} className="flex items-center gap-2">
+      <span style={{ width: 68, fontSize: 9.5, color: "var(--clpa-muted)" }}>{t.label}</span>
+      <div style={{ flex: 1, height: 6, borderRadius: 999, background: "var(--clpa-surface-border)", overflow: "hidden" }}>
+        <div style={{ width: `${t.pct}%`, height: "100%", borderRadius: 999, background: t.color }} />
+      </div>
+      <div className="flex items-center gap-1 flex-shrink-0" style={{ minWidth: 32, justifyContent: "flex-end" }}>
+        <span style={{ textAlign: "right", fontSize: 9.5, fontWeight: 600, color: "var(--clpa-body)" }}>{t.value}</span>
+        {t.sample && <SampleTag />}
+      </div>
+    </div>
+  ));
+
   return (
     <>
       {fanRpm != null && (
@@ -1621,23 +1637,10 @@ function ThermalCard() {
           <StatusBadge label={thermalBadgeLabel} sample={thermalBadgeSample} />
         </div>
 
-        <div className="flex items-center gap-3 mb-2.5">
-          <div className="flex-1 flex flex-col gap-1.5">
-            {temps.map((t, i) => (
-              <div key={i} className="flex items-center gap-2">
-                <span style={{ width: 68, fontSize: 9.5, color: "var(--clpa-muted)" }}>{t.label}</span>
-                <div style={{ flex: 1, height: 6, borderRadius: 999, background: "var(--clpa-surface-border)", overflow: "hidden" }}>
-                  <div style={{ width: `${t.pct}%`, height: "100%", borderRadius: 999, background: t.color }} />
-                </div>
-                <div className="flex items-center gap-1 flex-shrink-0" style={{ minWidth: 32, justifyContent: "flex-end" }}>
-                  <span style={{ textAlign: "right", fontSize: 9.5, fontWeight: 600, color: "var(--clpa-body)" }}>{t.value}</span>
-                  {t.sample && <SampleTag />}
-                </div>
-              </div>
-            ))}
-          </div>
+        {fanRpm != null ? (
+          <div className="flex items-center gap-3 mb-2.5">
+            <div className="flex-1 flex flex-col gap-1.5">{tempRows}</div>
 
-          {fanRpm != null && (
             <div className="flex flex-col items-center flex-shrink-0" style={{ width: 72 }}>
               <div
                 style={{
@@ -1662,8 +1665,10 @@ function ThermalCard() {
                 <span style={{ fontSize: 9, color: "var(--clpa-muted)" }}>RPM</span>
               </div>
             </div>
-          )}
-        </div>
+          </div>
+        ) : (
+          <div className="flex flex-col gap-1.5 mb-2.5">{tempRows}</div>
+        )}
 
         <div style={{ borderTop: "1px solid var(--clpa-divider)", paddingTop: 9 }}>
           <div className="flex items-center gap-2">
