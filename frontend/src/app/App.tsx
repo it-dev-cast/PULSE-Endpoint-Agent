@@ -36,6 +36,10 @@ import {
   listPhysicalDrives,
   listDisplayGpus,
   getPrimaryGpu,
+  gpuDisplayName,
+  gpuVramLabel,
+  getMotherboardProduct,
+  getThermalRows,
   listMemoryModules,
   listBatteries,
   listConnectedAdapters,
@@ -1554,75 +1558,12 @@ function StorageCard() {
 }
 
 // ─── Thermal Card ─────────────────────────────────────────
-const THERMAL_ZONE_COLORS = ["var(--clpa-critical-bright)", "var(--clpa-warning-bright)", "var(--clpa-emerald)", "var(--clpa-teal-bright)", "var(--clpa-accent)", "var(--clpa-primary)"];
-
 function ThermalCard() {
   const { thresholds } = useApp();
   const { data, connected } = useTelemetry();
-  const thermalZones = connected ? data?.thermal ?? [] : [];
-  const hasRealZones = thermalZones.length > 0;
-
-  // Real when smartctl.exe is installed and exposes a temperature reading; sample otherwise.
-  const ssdTempC = connected && data?.storageHealth?.temperature?.current != null ? data.storageHealth.temperature.current : null;
-
-  // cpuTempC/gpuTempC/batteryTemperatureC (used elsewhere) only ever come from
-  // LibreHardwareMonitor - a separate app the user installs and runs themselves (its Remote
-  // Web Server, polled by telemetry-server.mjs). motherboardTempC and fanRpm are different:
-  // telemetry-server.mjs also merges in HWiNFO's shared memory (local-agent/rust-collector/src/hwinfo.rs)
-  // as a second optional real source for those two specifically (and cpuVoltage, read in
-  // CPUCard), preferring whichever source actually has a value. Each field is still
-  // independently null when neither source is running, or when running but doesn't expose a
-  // sensor matching this project's name patterns on this specific hardware. Windows WMI was
-  // investigated directly as a third, OS-native avenue for Motherboard Temp specifically (root\WMI's
-  // MSAcpi_ThermalZoneTemperature - see thermalZones below - and root\dcim's Dell OMCI/DCIM
-  // namespace) and confirmed to add nothing on this machine either.
   const hwMon = connected ? data?.hardwareMonitor : null;
-  const cpuTempC = hwMon?.cpuTempC ?? null;
-  const gpuTempC = hwMon?.gpuTempC ?? null;
-  const moboTempC = hwMon?.motherboardTempC ?? null;
-  const dimmTempC = hwMon?.dimmTempC ?? null;
   const fanRpm = hwMon?.fanRpm ?? null;
-
-  // MSAcpi_ThermalZoneTemperature doesn't reliably identify which zone is CPU vs. GPU vs.
-  // SSD vs. motherboard (InstanceName is a generic ACPI path like "_TZ.THRM", not a labeled
-  // component), so real readings are shown as generic zones rather than fabricating a mapping
-  // we don't actually have. This WMI class is also frequently absent entirely — on many
-  // machines (this one included) it returns no zones at all: confirmed directly that querying
-  // it here throws "Not supported" (the ACPI driver on this hardware doesn't implement the data
-  // block at all, not merely an empty result) — in which case we fall back to
-  // illustrative CPU/GPU/SSD/Motherboard rows, each independently real when a real source
-  // supplies that specific reading (LibreHardwareMonitor for CPU/GPU; LibreHardwareMonitor or
-  // HWiNFO for Motherboard; smartctl for SSD), sample otherwise. A Dell-specific WMI namespace
-  // (root\dcim, root\dcim\sysman) was also checked as a further fallback and found to exist only
-  // as an empty schema skeleton, with none of Dell Command | Monitor's own DCIM_* classes
-  // actually registered - so no additional source there either.
-  const temps = hasRealZones
-    ? thermalZones.map((zone, i) => {
-        const celsius = zone.CurrentTemperature / 10 - 273.15;
-        return {
-          label: `Zone ${i + 1}`,
-          value: `${Math.round(celsius)}°C`,
-          pct: Math.max(0, Math.min(100, Math.round(celsius))),
-          color: THERMAL_ZONE_COLORS[i % THERMAL_ZONE_COLORS.length],
-          sample: false,
-        };
-      })
-    : [
-        cpuTempC != null
-          ? { label: "CPU Temp", value: `${Math.round(cpuTempC)}°C`, pct: Math.max(0, Math.min(100, Math.round(cpuTempC))), color: "var(--clpa-critical-bright)", sample: false }
-          : { label: "CPU Temp", value: "—", pct: 0, color: "var(--clpa-critical-bright)", sample: false },
-        gpuTempC != null
-          ? { label: "GPU Temp", value: `${Math.round(gpuTempC)}°C`, pct: Math.max(0, Math.min(100, Math.round(gpuTempC))), color: "var(--clpa-warning-bright)", sample: false }
-          : { label: "GPU Temp", value: "—", pct: 0, color: "var(--clpa-warning-bright)", sample: false },
-        ssdTempC != null
-          ? { label: "SSD Temp", value: `${Math.round(ssdTempC)}°C`, pct: Math.max(0, Math.min(100, Math.round(ssdTempC))), color: "var(--clpa-emerald)", sample: false }
-          : { label: "SSD Temp", value: "—", pct: 0, color: "var(--clpa-emerald)", sample: false },
-        moboTempC != null
-          ? { label: "Motherboard", value: `${Math.round(moboTempC)}°C`, pct: Math.max(0, Math.min(100, Math.round(moboTempC))), color: "var(--clpa-teal-bright)", sample: false }
-          : dimmTempC != null
-            ? { label: "DIMM Temp", value: `${Math.round(dimmTempC)}°C`, pct: Math.max(0, Math.min(100, Math.round(dimmTempC))), color: "var(--clpa-teal-bright)", sample: false }
-            : { label: "Motherboard", value: "—", pct: 0, color: "var(--clpa-teal-bright)", sample: false },
-      ];
+  const temps = getThermalRows(data, connected, thresholds.cpuTempWarning, thresholds.cpuTempCritical);
 
   // Real Normal/Warning/Critical from the worst real reading across CPU/GPU/SSD/Motherboard,
   // against useAlertEngine's own live cpu-temp thresholds (reused here since there's no separate
@@ -1632,11 +1573,13 @@ function ThermalCard() {
   const thermalBadgeSample = thermalBadge.sample;
 
   const coolingFooter =
-    thermalBadgeLabel === "Critical"
+    thermalBadgeSample
+      ? { text: "Waiting for temperature sensors", color: "var(--clpa-muted)" }
+      : thermalBadgeLabel === "Critical"
       ? { text: "Critical temperature detected", color: "var(--clpa-critical)" }
       : thermalBadgeLabel === "Warning"
       ? { text: "Elevated temperature detected", color: "var(--clpa-warning)" }
-      : { text: "Cooling system optimal", color: "var(--clpa-success-bright)" };
+      : { text: "All sensors within range", color: "var(--clpa-success-bright)" };
 
   return (
     <>
@@ -1646,8 +1589,10 @@ function ThermalCard() {
           to { transform: rotate(360deg); }
         }
         .thermal-fan {
-          animation: thermalFanSpin 1.8s linear infinite;
           transform-origin: center;
+        }
+        .thermal-fan.is-spinning {
+          animation: thermalFanSpin 1.8s linear infinite;
         }
       `}</style>
 
@@ -1699,7 +1644,7 @@ function ThermalCard() {
                 border: "1px solid var(--clpa-input-border)",
               }}
             >
-              <svg className="thermal-fan" width="40" height="40" viewBox="0 0 100 100">
+              <svg className={`thermal-fan${fanRpm != null ? " is-spinning" : ""}`} width="40" height="40" viewBox="0 0 100 100">
                 <circle cx="50" cy="50" r="10" fill="var(--clpa-body-alt)" />
                 {[0, 90, 180, 270].map((rot) => (
                   <path key={rot} d="M50 15 C75 15,75 40,58 48" fill="var(--clpa-body)" transform={`rotate(${rot} 50 50)`} />
@@ -1707,16 +1652,10 @@ function ThermalCard() {
                 <circle cx="50" cy="50" r="5" fill="var(--clpa-subtle)" />
               </svg>
             </div>
-            {/* No standard WMI class exposes fan RPM across OEMs; real when either
-                LibreHardwareMonitor or HWiNFO is installed, running, and exposes a fan sensor -
-                many laptops expose none at all through either source (confirmed directly: this
-                project's own dev laptop reports zero Fan-type entries via HWiNFO). Confirmed
-                unavailable via Windows WMI too: Win32_Fan (root\CIMV2) does return two "Cooling
-                Device" instances on this machine, but DesiredSpeed/VariableSpeed - the only
-                properties that could carry an actual RPM number - are empty on both; it's a
-                presence/status abstraction, not a tachometer reading. The Dell OMCI/DCIM
-                namespace (root\dcim, root\dcim\sysman) exists only as an empty schema skeleton
-                here too - Dell's own fan-sensor classes aren't registered on this machine. */}
+            {/* RPM from LibreHardwareMonitor (any fan sensor), HWiNFO (any Fan-type reading),
+                or Win32_Fan.DesiredSpeed. Null when none of those expose a tachometer - common
+                on thin laptops whose EC is not mapped in LHM (this Dell's "Dell 0DPVMT" node
+                has zero child sensors). Never invented. */}
             <div style={{ marginTop: 6, fontSize: 16, fontWeight: 800, color: "var(--clpa-title)" }}>
               {fanRpm != null ? Math.round(fanRpm).toLocaleString() : "—"}
             </div>
@@ -1745,13 +1684,12 @@ function GPUCard() {
   const gpus = listDisplayGpus(data, connected);
   const gpuInfo = getPrimaryGpu(data, connected);
 
-  const gpuName = gpuInfo?.Name ? gpuInfo.Name.trim() : "Unknown GPU";
+  const gpuName = gpuDisplayName(gpuInfo, connected ? data?.hardwareMonitor?.gpuName : null) || "Unknown GPU";
   const driverVersion = gpuInfo?.DriverVersion ? gpuInfo.DriverVersion : "—";
 
   const gpuUtilReal = connected && data?.gpuUtilization != null ? data.gpuUtilization : null;
-  const utilization = gpuUtilReal;
-  const vramReal = gpuInfo?.AdapterRAM != null;
-  const vramTotal = vramReal ? bytesToGb(gpuInfo!.AdapterRAM) : null;
+  const utilization = gpuUtilReal != null ? Math.max(0, Math.min(100, gpuUtilReal)) : null;
+  const vram = gpuVramLabel(gpuInfo);
 
   const gpuBadge = getGpuBadge(data, connected, thresholds.cpuTempWarning);
   const gpuBadgeLabel = gpuBadge.label;
@@ -1790,8 +1728,8 @@ function GPUCard() {
               <div className="flex flex-col gap-0.5" style={{ marginTop: 4 }}>
                 {gpus.filter((g) => g !== gpuInfo).map((g) => (
                   <div key={g.Name} style={{ fontSize: 10, color: "var(--clpa-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                    {g.Name?.trim()}
-                    {g.AdapterRAM != null ? ` · ${bytesToGb(g.AdapterRAM)} GB` : ""}
+                    {gpuDisplayName(g)}
+                    {gpuVramLabel(g).label !== "—" ? ` · ${gpuVramLabel(g).label}` : ""}
                   </div>
                 ))}
               </div>
@@ -1812,8 +1750,8 @@ function GPUCard() {
           <div className="flex items-center justify-between" style={{ borderTop: "1px solid var(--clpa-divider)", paddingTop: 8 }}>
             <span style={{ fontSize: 9.5, color: "var(--clpa-muted)", fontWeight: 500 }}>VRAM</span>
             <div className="flex items-center gap-1">
-              <span style={{ fontSize: 10.5, fontWeight: 600, color: "var(--clpa-body)" }}>{vramTotal != null ? `${vramTotal} GB` : "—"}</span>
-              {!vramReal && <SampleTag />}
+              <span style={{ fontSize: 10.5, fontWeight: 600, color: "var(--clpa-body)" }}>{vram.label}</span>
+              {vram.sample && <SampleTag />}
             </div>
           </div>
         </div>
@@ -1879,12 +1817,12 @@ function OSCard() {
   const { data, connected } = useTelemetry();
   const osDetail = data?.osDetail;
 
-  const osCaption = connected && osDetail?.Caption ? osDetail.Caption : "Unknown OS";
-  const buildNumber = connected && osDetail?.BuildNumber ? osDetail.BuildNumber : "—";
-  const osVersion = connected && osDetail?.Version ? osDetail.Version : "—";
+  const osCaption = connected && osDetail?.Caption ? String(osDetail.Caption) : "Unknown OS";
+  const buildNumber = connected && osDetail?.BuildNumber != null && String(osDetail.BuildNumber).trim() ? String(osDetail.BuildNumber) : "—";
+  const osVersion = connected && osDetail?.Version != null && String(osDetail.Version).trim() ? String(osDetail.Version) : "—";
   const uptimeReal = connected && osDetail?.UptimeFormatted != null;
   const uptime = uptimeReal ? osDetail!.UptimeFormatted : "—";
-  const architecture = connected && osDetail?.OSArchitecture ? osDetail.OSArchitecture : "—";
+  const architecture = connected && osDetail?.OSArchitecture != null && String(osDetail.OSArchitecture).trim() ? String(osDetail.OSArchitecture) : "—";
   const bootMode = connected && data?.bootMode ? data.bootMode : "—";
   const lastBoot = connected ? parseWmiDate(osDetail?.LastBootUpTime) : null;
   const lastBootLabel = lastBoot ? formatRelativeTime(lastBoot.toISOString()) ?? "—" : "—";
@@ -1985,14 +1923,13 @@ function OSCard() {
 function HardwareInventoryCard() {
   const { navigate } = useApp();
   const { data, connected } = useTelemetry();
-  const board = data?.board;
   const bios = data?.bios;
   const enclosure = data?.enclosure;
   const system = data?.system;
 
   const manufacturer = connected && system?.Vendor ? system.Vendor : "—";
   const model = connected && system?.Name ? system.Name : "—";
-  const motherboard = connected && board?.Product ? board.Product : "—";
+  const motherboard = getMotherboardProduct(data, connected) ?? "—";
   const biosDate = connected ? formatWmiDate(bios?.ReleaseDate) : null;
   const biosVersionLabel =
     connected && bios?.SMBIOSBIOSVersion
@@ -4122,11 +4059,10 @@ function HWComponentsSection() {
 
   const gpus = listDisplayGpus(data, connected);
   const gpuInfo = getPrimaryGpu(data, connected);
-  const gpuName = gpuInfo?.Name ? gpuInfo.Name.trim() : gpus.length > 1 ? `${gpus.length} GPUs` : "Unknown GPU";
+  const gpuName = gpuDisplayName(gpuInfo, connected ? data?.hardwareMonitor?.gpuName : null) || (gpus.length > 1 ? `${gpus.length} GPUs` : "Unknown GPU");
   const gpuDriver = gpuInfo?.DriverVersion ? gpuInfo.DriverVersion : "—";
-  const gpuVramReal = gpuInfo?.AdapterRAM != null;
-  const gpuVramGB = gpuVramReal ? bytesToGb(gpuInfo!.AdapterRAM) : null;
-  const gpuUtilPct = connected && data?.gpuUtilization != null ? data.gpuUtilization : null;
+  const gpuVram = gpuVramLabel(gpuInfo);
+  const gpuUtilPct = connected && data?.gpuUtilization != null ? Math.max(0, Math.min(100, data.gpuUtilization)) : null;
 
   // Same LibreHardwareMonitor source as Dashboard's ThermalCard - reused directly, not re-derived.
   const hwMon = connected ? data?.hardwareMonitor : null;
@@ -4149,11 +4085,11 @@ function HWComponentsSection() {
   const batteryRemainingHM = formatMinutesAsHM(getBatteryRemainingMinutes(data, connected));
   const batteryOnAc = connected && isBatteryOnAc(data?.battery?.[0]?.BatteryStatus);
 
-  const board = data?.board;
   const bios = data?.bios;
   const systemVendor = connected && data?.system?.Vendor ? data.system.Vendor : "Unknown manufacturer";
-  const motherboardReal = connected && board?.Product != null;
-  const motherboardSubtitle = motherboardReal ? `${systemVendor} ${board!.Product}` : "Unknown motherboard";
+  const motherboardName = getMotherboardProduct(data, connected);
+  const motherboardReal = motherboardName != null;
+  const motherboardSubtitle = motherboardReal ? `${systemVendor} ${motherboardName}` : "Unknown motherboard";
   const biosVersionReal = connected && bios?.SMBIOSBIOSVersion != null;
   const biosVersion = biosVersionReal ? bios!.SMBIOSBIOSVersion : "Unknown";
   const biosDate = connected ? formatWmiDate(bios?.ReleaseDate) : null;
@@ -4284,12 +4220,12 @@ function HWComponentsSection() {
       title: "GPU", subtitle: gpuName, primaryValue: gpuUtilPct != null ? `${gpuUtilPct}%` : "—", primaryLabel: "Current Utilization", primarySample: gpuUtilPct == null,
       ...hwBadgeStatus(gpuStatusBadge),
       rows: [
-        { label: "VRAM", value: gpuVramGB != null ? `${gpuVramGB} GB` : "—", sample: !gpuVramReal },
+        { label: "VRAM", value: gpuVram.label, sample: gpuVram.sample },
         { label: "Driver", value: gpuDriver },
         { label: "Temp", value: gpuTempC != null ? `${Math.round(gpuTempC)}°C` : "—", sample: gpuTempC == null },
         ...gpus.filter((g) => g !== gpuInfo).map((g) => ({
-          label: g.Name?.trim() || "GPU",
-          value: g.AdapterRAM != null ? `${bytesToGb(g.AdapterRAM)} GB` : "—",
+          label: gpuDisplayName(g) || "GPU",
+          value: gpuVramLabel(g).label,
         })),
       ],
     },

@@ -25,6 +25,17 @@ fn round2(value: f32) -> f64 {
     format!("{value:.2}").parse().unwrap()
 }
 
+fn nonempty_opt(value: Option<String>) -> Option<String> {
+    value.and_then(|s| {
+        let t = s.trim();
+        if t.is_empty() {
+            None
+        } else {
+            Some(t.to_string())
+        }
+    })
+}
+
 // --sign-fingerprint is a second, separate real mode alongside the normal telemetry-collection
 // run below (the default, argument-less invocation telemetry-server.mjs already calls every 5s) -
 // not a flag that changes collect()'s own behavior. telemetry-server.mjs uses this one to get the
@@ -306,6 +317,7 @@ fn run_collect() {
         AdapterRAM: Option<u32>,
         DriverVersion: Option<String>,
         AdapterCompatibility: Option<String>,
+        VideoProcessor: Option<String>,
     }
 
     let gpu: Vec<serde_json::Value> = (|| {
@@ -349,9 +361,10 @@ fn run_collect() {
                             g.AdapterRAM
                         );
                     }
+                    let name = nonempty_opt(g.Name).or_else(|| nonempty_opt(g.VideoProcessor));
                     json!({
-                        "name": g.Name,
-                        "adapterRAMBytes": g.AdapterRAM,
+                        "name": name,
+                        "adapterRAMBytes": if adapter_ram_unreliable { serde_json::Value::Null } else { json!(g.AdapterRAM) },
                         "adapterRAMUnreliable": adapter_ram_unreliable,
                         "driverVersion": g.DriverVersion,
                         "adapterCompatibility": g.AdapterCompatibility,

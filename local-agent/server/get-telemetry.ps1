@@ -42,8 +42,19 @@ try {
     $memoryTotalSlots = $null
 }
 
-$gpu = Get-CimInstance Win32_VideoController |
-    Select-Object Name, AdapterRAM, DriverVersion, AdapterCompatibility, DriverDate
+$gpuSkip = "Microsoft Basic Display|Remote Display|Virtual Display|IDD Driver|Parsec|spacedesk|USB Display|Mirage Driver|Indirect Display"
+$gpu = @(Get-CimInstance Win32_VideoController |
+    Where-Object { $_.Name -and $_.Name -notmatch $gpuSkip } |
+    Select-Object Name, AdapterRAM, DriverVersion, AdapterCompatibility, DriverDate, VideoProcessor)
+if ($gpu.Count -eq 0) {
+    $gpu = @(Get-CimInstance Win32_VideoController |
+        Select-Object Name, AdapterRAM, DriverVersion, AdapterCompatibility, DriverDate, VideoProcessor)
+}
+foreach ($g in $gpu) {
+    if (-not $g.Name -and $g.VideoProcessor) {
+        $g | Add-Member -NotePropertyName Name -NotePropertyValue $g.VideoProcessor -Force
+    }
+}
 
 $net = Get-CimInstance Win32_NetworkAdapter |
     Where-Object {
@@ -55,9 +66,25 @@ $net = Get-CimInstance Win32_NetworkAdapter |
 
 $osDetail = Get-CimInstance Win32_OperatingSystem |
     Select-Object Caption, BuildNumber, Version, LastBootUpTime, OSArchitecture
+if ($osDetail) {
+    if (-not $osDetail.OSArchitecture) {
+        $osArch = if ([Environment]::Is64BitOperatingSystem) { "64-bit" } else { "32-bit" }
+        $osDetail | Add-Member -NotePropertyName OSArchitecture -NotePropertyValue $osArch -Force
+    }
+    if ($osDetail.BuildNumber -ne $null) { $osDetail.BuildNumber = [string]$osDetail.BuildNumber }
+    if ($osDetail.Version -ne $null) { $osDetail.Version = [string]$osDetail.Version }
+}
 
 $board = Get-CimInstance Win32_BaseBoard |
     Select-Object Product, SerialNumber
+if ($board -and -not $board.Product) {
+    try {
+        $csp = Get-CimInstance Win32_ComputerSystemProduct -ErrorAction Stop
+        if ($csp.Name) {
+            $board | Add-Member -NotePropertyName Product -NotePropertyValue $csp.Name -Force
+        }
+    } catch {}
+}
 
 $enclosure = Get-CimInstance Win32_SystemEnclosure |
     Select-Object SMBIOSAssetTag
@@ -261,6 +288,8 @@ $gpuUtil = $null
 try {
     $gpuCounter = Get-Counter '\GPU Engine(*engtype_3D)\Utilization Percentage' -ErrorAction Stop
     $gpuUtil = [math]::Round(($gpuCounter.CounterSamples | Measure-Object -Property CookedValue -Sum).Sum, 0)
+    if ($gpuUtil -gt 100) { $gpuUtil = 100 }
+    if ($gpuUtil -lt 0) { $gpuUtil = 0 }
 } catch {
     $gpuUtil = $null
 }
@@ -354,6 +383,18 @@ $logicalDisks = @(Get-CimInstance Win32_LogicalDisk -Filter "DriveType=3" | ForE
     }
 })
 
+$wmiFanRpm = $null
+try {
+    $speeds = @(Get-CimInstance Win32_Fan -ErrorAction Stop |
+        ForEach-Object { $_.DesiredSpeed } |
+        Where-Object { $null -ne $_ -and $_ -ge 80 -and $_ -le 20000 })
+    if ($speeds.Count -gt 0) {
+        $wmiFanRpm = [int](($speeds | Measure-Object -Maximum).Maximum)
+    }
+} catch {
+    $wmiFanRpm = $null
+}
+
 $uptimeFormatted = $null
 if ($osDetail -and $osDetail.LastBootUpTime) {
     $uptimeSpan = (Get-Date) - $osDetail.LastBootUpTime
@@ -395,6 +436,7 @@ $result = [ordered]@{
     logicalDisks  = @($logicalDisks)
     batteryRunTimeMinutes = $batteryRunTimeMinutes
     batteryReportHealth   = $batteryReportHealth
+    wmiFanRpm             = $wmiFanRpm
     secureBootEnabled     = $secureBootEnabled
     defenderStatus        = $defenderStatus
     avProducts            = @($avProducts)

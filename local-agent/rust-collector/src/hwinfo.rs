@@ -107,7 +107,21 @@ pub struct HwInfoResult {
 // on hardware that either doesn't expose it or labels it something not on this list.
 const CPU_VOLTAGE_PATTERNS: &[&str] = &["cpu core", "vcore"];
 const MOTHERBOARD_TEMP_PATTERNS: &[&str] = &["motherboard", "system"];
-const FAN_PATTERNS: &[&str] = &["cpu fan", "chassis fan"];
+const FAN_PATTERNS: &[&str] = &[
+    "cpu fan",
+    "chassis fan",
+    "system fan",
+    "sys fan",
+    "gpu fan",
+    "fan #",
+    "fan1",
+    "fan 1",
+    "fan speed",
+    "cpu",
+    "gpu",
+    "chassis",
+    "system",
+];
 
 // "VID" (Voltage IDentification) is Intel's own term for these per-core/per-rail readings -
 // confirmed against this project's real hardware to cover "P-core N VID", "E-core N VID",
@@ -254,9 +268,14 @@ unsafe fn parse_shared_memory(base: *const u8) -> Option<HwInfoResult> {
             out.motherboard_temp_c = Some(HwInfoReading { value, name_user, name_original });
             continue;
         }
-        if sensor_type == SENSOR_TYPE_FAN && out.fan_rpm.is_none() && matches_any(&name_lower, FAN_PATTERNS) {
+        if sensor_type == SENSOR_TYPE_FAN {
             let value = unsafe { read_f64(entry_base, ENTRY_OFF_VALUE) };
-            out.fan_rpm = Some(HwInfoReading { value, name_user, name_original });
+            if value >= 80.0 && value <= 20000.0 {
+                let named = matches_any(&name_lower, FAN_PATTERNS) || name_lower.contains("fan");
+                if named && (out.fan_rpm.is_none() || value > out.fan_rpm.as_ref().map(|r| r.value).unwrap_or(0.0)) {
+                    out.fan_rpm = Some(HwInfoReading { value, name_user, name_original });
+                }
+            }
             continue;
         }
 

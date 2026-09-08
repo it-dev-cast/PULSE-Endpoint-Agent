@@ -281,25 +281,135 @@ export function listConnectedAdapters(data: Snapshot, connected: boolean) {
 const GPU_SKIP_RE =
   /microsoft basic display|remote display|virtual display|idd driver|parsec|spacedesk|usb display|mirage driver|indirect display/i;
 
+const INTEGRATED_GPU_RE =
+  /uhd graphics|iris( xe| plus)? graphics|intel\(r\) hd graphics|intel hd graphics|intel\(r\) graphics|radeon\(tm\) graphics|radeon graphics(?!\s+pro)|vega \d+|graphics \d+/i;
+
+const ADAPTER_RAM_SENTINEL = 0xffffffff;
+
+type GpuLike = NonNullable<TelemetrySnapshot["gpu"]>[number];
+
+export function gpuDisplayName(
+  g: { Name?: string | null; AdapterCompatibility?: string | null } | null | undefined,
+  fallback?: string | null,
+): string {
+  const name = (g?.Name ?? "").trim();
+  if (name) return name;
+  const compat = (g?.AdapterCompatibility ?? "").trim();
+  if (compat) return `${compat} Graphics`;
+  return (fallback ?? "").trim();
+}
+
+export function isIntegratedGpu(g: GpuLike | null | undefined): boolean {
+  const blob = `${g?.Name ?? ""} ${g?.AdapterCompatibility ?? ""}`;
+  if (INTEGRATED_GPU_RE.test(blob)) return true;
+  if (/nvidia|geforce|quadro|rtx |radeon rx|arc a\d/i.test(blob)) return false;
+  return /intel/i.test(blob);
+}
+
+export function gpuVramLabel(g: GpuLike | null | undefined): { label: string; sample: boolean } {
+  if (!g) return { label: "—", sample: true };
+  const ram = g.AdapterRAM;
+  const unreliable = g.AdapterRAMUnreliable === true || ram === 0 || ram === ADAPTER_RAM_SENTINEL;
+  if (ram != null && Number.isFinite(ram) && ram > 0 && !unreliable) {
+    const gb = bytesToGb(ram);
+    return gb != null ? { label: `${gb} GB`, sample: false } : { label: "—", sample: true };
+  }
+  if (isIntegratedGpu(g)) return { label: "Shared", sample: false };
+  return { label: "—", sample: true };
+}
+
 export function listDisplayGpus(data: Snapshot, connected: boolean) {
-  if (!connected || !data?.gpu?.length) return [];
+  if (!connected || !data) return [];
   const seen = new Set<string>();
   const out: NonNullable<TelemetrySnapshot["gpu"]> = [];
-  for (const g of data.gpu) {
-    const name = (g?.Name ?? "").trim();
+  const lhmName = data.hardwareMonitor?.gpuName?.trim() || "";
+  for (const g of data.gpu ?? []) {
+    const name = gpuDisplayName(g, lhmName);
     if (!name || GPU_SKIP_RE.test(name)) continue;
     const key = name.toLowerCase();
     if (seen.has(key)) continue;
     seen.add(key);
-    out.push(g);
+    out.push({ ...g, Name: name });
+  }
+  if (out.length === 0 && lhmName && !GPU_SKIP_RE.test(lhmName)) {
+    out.push({ Name: lhmName });
   }
   return out;
 }
 
 export function getPrimaryGpu(data: Snapshot, connected: boolean) {
   const list = listDisplayGpus(data, connected);
-  const discrete = list.find((g) => /nvidia|geforce|quadro|rtx |radeon|arc a\d/i.test(g.Name ?? ""));
+  const discrete = list.find((g) => /nvidia|geforce|quadro|rtx |radeon rx|arc a\d/i.test(g.Name ?? ""));
   return discrete ?? list[0] ?? null;
+}
+
+export function getMotherboardProduct(data: Snapshot, connected: boolean): string | null {
+  if (!connected) return null;
+  const product = data?.board?.Product?.trim();
+  if (product) return product;
+  const model = data?.system?.Name?.trim();
+  return model || null;
+}
+
+/** ACPI MSAcpi_ThermalZoneTemperature.CurrentTemperature is tenths of Kelvin; some firmware emits Kelvin or °C. */
+export function acpiCurrentTemperatureToC(raw: number | null | undefined): number | null {
+  if (raw == null || !Number.isFinite(raw)) return null;
+  const tenthsK = raw / 10 - 273.15;
+  if (tenthsK >= 0 && tenthsK <= 125) return tenthsK;
+  const kelvin = raw - 273.15;
+  if (kelvin >= 0 && kelvin <= 125) return kelvin;
+  if (raw >= 0 && raw <= 125) return raw;
+  return null;
+}
+
+export function thermalSeverityColor(tempC: number | null, warning: number, critical: number): string {
+  if (tempC == null) return "var(--clpa-track)";
+  if (tempC > critical) return "var(--clpa-critical-bright)";
+  if (tempC >= warning) return "var(--clpa-warning-bright)";
+  return "var(--clpa-emerald)";
+}
+
+export type ThermalRow = { label: string; value: string; pct: number; color: string; sample: boolean };
+
+function thermalTempRow(label: string, tempC: number | null, warning: number, critical: number): ThermalRow {
+  return {
+    label,
+    value: tempC != null ? `${Math.round(tempC)}°C` : "—",
+    pct: tempC != null ? Math.max(0, Math.min(100, Math.round(tempC))) : 0,
+    color: thermalSeverityColor(tempC, warning, critical),
+    sample: false,
+  };
+}
+
+export function getThermalRows(data: Snapshot, connected: boolean, warning: number, critical: number): ThermalRow[] {
+  if (!connected) {
+    return ["CPU Temp", "GPU Temp", "SSD Temp", "Motherboard"].map((label) => thermalTempRow(label, null, warning, critical));
+  }
+  const hwMon = data?.hardwareMonitor;
+  const cpuTempC = hwMon?.cpuTempC ?? null;
+  const gpuTempC = hwMon?.gpuTempC ?? null;
+  const moboTempC = hwMon?.motherboardTempC ?? null;
+  const dimmTempC = hwMon?.dimmTempC ?? null;
+  const ssdTempC = data?.storageHealth?.temperature?.current ?? null;
+  const hasLabeled = [cpuTempC, gpuTempC, ssdTempC, moboTempC, dimmTempC].some((t) => t != null);
+  if (hasLabeled) {
+    return [
+      thermalTempRow("CPU Temp", cpuTempC, warning, critical),
+      thermalTempRow("GPU Temp", gpuTempC, warning, critical),
+      thermalTempRow("SSD Temp", ssdTempC, warning, critical),
+      moboTempC != null
+        ? thermalTempRow("Motherboard", moboTempC, warning, critical)
+        : thermalTempRow(dimmTempC != null ? "DIMM Temp" : "Motherboard", dimmTempC, warning, critical),
+    ];
+  }
+  const zones = (data?.thermal ?? [])
+    .map((zone, i) => {
+      const c = acpiCurrentTemperatureToC(zone?.CurrentTemperature);
+      return c == null ? null : thermalTempRow(`Zone ${i + 1}`, c, warning, critical);
+    })
+    .filter((row): row is ThermalRow => row != null);
+  if (zones.length > 0) return zones;
+  return ["CPU Temp", "GPU Temp", "SSD Temp", "Motherboard"].map((label) => thermalTempRow(label, null, warning, critical));
 }
 
 export function getStorageBadge(data: Snapshot, connected: boolean): Badge {
@@ -356,7 +466,10 @@ export function colorForHealthPercent(pct: number | null, warning: number, criti
 export function getThermalCardBadge(data: Snapshot, connected: boolean, warning: number, critical: number): Badge {
   const hwMon = connected ? data?.hardwareMonitor : null;
   const ssdTempC = connected ? data?.storageHealth?.temperature?.current ?? null : null;
-  const temps = [hwMon?.cpuTempC, hwMon?.gpuTempC, hwMon?.motherboardTempC, hwMon?.dimmTempC, ssdTempC].filter(
+  const zoneTemps = connected
+    ? (data?.thermal ?? []).map((z) => acpiCurrentTemperatureToC(z?.CurrentTemperature)).filter((t): t is number => t != null)
+    : [];
+  const temps = [hwMon?.cpuTempC, hwMon?.gpuTempC, hwMon?.motherboardTempC, hwMon?.dimmTempC, ssdTempC, ...zoneTemps].filter(
     (t): t is number => t != null,
   );
   if (temps.length === 0) return { label: "Unknown", sample: true };

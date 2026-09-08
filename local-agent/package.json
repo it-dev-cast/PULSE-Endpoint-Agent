@@ -1,9 +1,10 @@
 {
   "name": "pulse-endpoint-local-agent",
   "private": true,
-  "description": "Build-only tooling for local-agent's real installer packaging (see scripts/build-telemetry-exe.ps1) - telemetry-server.mjs itself still has zero runtime dependencies, this is not a dependency of the server at runtime.",
+  "description": "Build-only tooling for local-agent's real installer packaging (see scripts/build-telemetry-exe.ps1). mqtt is an optional source import (dynamic, only if mqttBrokerUrl is set); esbuild inlines it into the single-file CJS bundle. The shipped exe still needs no node_modules at runtime.",
   "devDependencies": {
-    "esbuild": "^0.24.0"
+    "esbuild": "^0.24.0",
+    "mqtt": "^5.15.2"
   },
   "scripts": {
     "build:telemetry-exe": "powershell -ExecutionPolicy Bypass -File scripts/build-telemetry-exe.ps1"

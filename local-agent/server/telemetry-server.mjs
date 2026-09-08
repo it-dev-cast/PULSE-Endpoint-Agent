@@ -35,7 +35,9 @@ function loadAgentConfig() {
     if (fs.existsSync(AGENT_CONFIG_PATH)) {
       const raw = fs.readFileSync(AGENT_CONFIG_PATH, "utf-8");
       const parsed = JSON.parse(raw);
-      console.log(`[telemetry] loaded ${AGENT_CONFIG_PATH} - backendUrl override: ${parsed.backendUrl || "(not set, using default)"}`);
+      console.log(
+        `[telemetry] loaded ${AGENT_CONFIG_PATH} - backendUrl override: ${parsed.backendUrl || "(not set, using default)"}, mqttBrokerUrl: ${parsed.mqttBrokerUrl || "(not set, MQTT publishing disabled)"}`,
+      );
       return parsed;
     }
     console.log(`[telemetry] no pulse-agent.config.json found - using default backend URL (localhost:8443 unless PULSE_BACKEND_URL is set)`);
@@ -54,6 +56,17 @@ const agentConfig = loadAgentConfig();
 // hardcoded localhost default (this dev machine's own real, current setup - unchanged for
 // everyone who hasn't set an override).
 let BACKEND_URL = agentConfig.backendUrl || process.env.PULSE_BACKEND_URL || "http://localhost:8443";
+
+// MQTT publish (Nexus One doc's wire contract: mqtts://<broker>:8883, mutual TLS,
+// casterly/devices/{device_id}/telemetry) - entirely optional, gated on mqttBrokerUrl being set
+// in pulse-agent.config.json. Unset - the default for every real device today - means none of
+// this runs: no client ever gets created, no connection ever attempted, zero behavior change
+// from before this existed. See publishMqttLiveStatus's own comment for how this runs ALONGSIDE
+// postLiveStatus's existing HTTP call, never replacing it.
+const MQTT_BROKER_URL = agentConfig.mqttBrokerUrl || null;
+const MQTT_CLIENT_CERT_PATH = agentConfig.mqttClientCertPath || null;
+const MQTT_CLIENT_KEY_PATH = agentConfig.mqttClientKeyPath || null;
+const MQTT_CA_CERT_PATH = agentConfig.mqttCaCertPath || null;
 
 // BACKEND_REQUEST_TIMEOUT_MS - was a hardcoded 5000 (5s) at every one of these call sites,
 // which is fine for a same-machine/same-LAN backend but genuinely too aggressive for a real
@@ -386,6 +399,19 @@ const LHM_URL = "http://localhost:8085/data.json";
 // That path encodes both which hardware the sensor belongs to and what kind of sensor it is,
 // so hardware/sensor category is read straight from SensorId rather than tracked via tree
 // ancestry - simpler and doesn't depend on the exact node nesting for a given hardware vendor.
+function collectGpuHardwareNames(node, out = []) {
+  if (!node) return out;
+  const id = String(node.SensorId || node.Identifier || "");
+  if (/^\/gpu-[a-z0-9-]+\/\d+$/i.test(id)) {
+    const text = String(node.Text || "").trim();
+    if (text && !out.includes(text)) out.push(text);
+  }
+  if (Array.isArray(node.Children)) {
+    for (const child of node.Children) collectGpuHardwareNames(child, out);
+  }
+  return out;
+}
+
 function collectSensors(node, out) {
   if (!node) return out;
   if (node.SensorId) {
@@ -413,9 +439,31 @@ function hardwareCategoryOf(sensorId) {
 }
 
 function parseNumericValue(raw) {
+  if (typeof raw === "number" && Number.isFinite(raw)) return raw;
   if (typeof raw !== "string") return null;
   const m = /-?[\d.]+/.exec(raw);
   return m ? Number(m[0]) : null;
+}
+
+// Laptop/desktop Super I/O, EC, and GPU fans all use LHM sensor type "fan". A 0 RPM reading
+// is a parked fan (real), but if another fan is spinning we prefer that for the dashboard
+// number. Out-of-range values are not RPM (LHM can emit junk on an unmatched EC).
+const FAN_RPM_MIN = 80;
+const FAN_RPM_MAX = 20000;
+
+function pickBestFanRpm(sensors) {
+  const fans = (sensors || [])
+    .filter((s) => sensorTypeOf(s.sensorId) === "fan")
+    .map((s) => {
+      const rpm = parseNumericValue(s.value);
+      const label = `${s.text || ""} ${s.sensorId || ""}`.toLowerCase();
+      return { rpm, label };
+    })
+    .filter((s) => typeof s.rpm === "number" && s.rpm >= FAN_RPM_MIN && s.rpm <= FAN_RPM_MAX);
+  if (fans.length === 0) return null;
+  const preferred = fans.filter((s) => /cpu|cpu fan|chassis|system|sys fan|gpu/.test(s.label));
+  const pool = preferred.length > 0 ? preferred : fans;
+  return Math.round(Math.max(...pool.map((s) => s.rpm)));
 }
 
 // LHM's "Remaining Time (Estimated)" sensor is formatted as H:MM:SS (e.g. "1:09:23"), not a
@@ -518,9 +566,10 @@ async function fetchHardwareMonitor() {
           /remaining/i.test(s.text || ""),
       ) ?? null;
 
-    // Many laptops expose no fan sensor at all through LibreHardwareMonitor - that's a real
-    // absence, not a bug, so this stays null rather than guessing.
-    const fanSensor = sensors.find((s) => sensorTypeOf(s.sensorId) === "fan") ?? null;
+    // Any LHM fan sensor in a real RPM range - Super I/O, EC, or GPU. HP/Lenovo/Dell desktops
+    // usually expose these; many thin laptops (this Dell included) have a motherboard node with
+    // zero child sensors, which still correctly yields null.
+    const fanRpm = pickBestFanRpm(sensors);
 
     const cpuVoltages = sensors.filter(
       (s) => hardwareCategoryOf(s.sensorId) === "cpu" && sensorTypeOf(s.sensorId) === "voltage",
@@ -530,17 +579,24 @@ async function fetchHardwareMonitor() {
 
     const batteryDegradationPct = batteryDegradationSensor ? parseNumericValue(batteryDegradationSensor.value) : null;
 
+    const gpuNames = collectGpuHardwareNames(tree, []);
+    const gpuName =
+      gpuNames.find((n) => /nvidia|geforce|quadro|rtx |radeon rx|arc a\d/i.test(n)) ??
+      gpuNames[0] ??
+      null;
+
     const result = {
       cpuTempC: cpuTempSensor ? parseNumericValue(cpuTempSensor.value) : null,
       gpuTempC: gpuTempSensor ? parseNumericValue(gpuTempSensor.value) : null,
       motherboardTempC: moboTempSensor ? parseNumericValue(moboTempSensor.value) : null,
       dimmTempC,
-      fanRpm: fanSensor ? parseNumericValue(fanSensor.value) : null,
+      fanRpm,
       cpuVoltage: cpuVoltageSensor ? parseNumericValue(cpuVoltageSensor.value) : null,
       batteryTemperatureC: batteryTempSensor ? parseNumericValue(batteryTempSensor.value) : null,
       batteryHealthLhmPercent: batteryDegradationPct != null ? Math.round(100 - batteryDegradationPct) : null,
       batteryRemainingTimeLhm: batteryRemainingTimeSensor ? parseHmsToMinutes(batteryRemainingTimeSensor.value) : null,
       cpuMinDistanceToTjMaxC,
+      gpuName,
     };
 
     if (!loggedHwMonDiagnostics) {
@@ -606,6 +662,7 @@ function mergeHwInfoIntoHardwareMonitor(lhm, hwinfo) {
     batteryHealthLhmPercent: null,
     batteryRemainingTimeLhm: null,
     cpuMinDistanceToTjMaxC: null,
+    gpuName: null,
   };
   return {
     ...base,
@@ -3381,6 +3438,120 @@ async function postLiveStatus(credentials, fields) {
   }
 }
 
+// mqtt.js's own built-in reconnectPeriod is a fixed interval, not the exponential backoff this
+// project already uses for the dashboard's SSE client (dashboard/src/lib/sse.js's INITIAL_RETRY_MS/
+// MAX_RETRY_MS) - reconnectPeriod is set to 0 below specifically to disable mqtt.js's own retry,
+// and reconnection is driven manually here with the exact same shape (1s initial, doubling, 30s
+// ceiling, reset to 1s on a real successful connect) so both of this project's "long-lived
+// connection that has to survive a flaky network" cases behave identically instead of two
+// different, independently-tuned reconnect policies for what's conceptually the same problem.
+const MQTT_INITIAL_RETRY_MS = 1000;
+const MQTT_MAX_RETRY_MS = 30000;
+
+let mqttClient = null;
+let mqttRetryMs = MQTT_INITIAL_RETRY_MS;
+let mqttReconnectTimer = null;
+let mqttClientDeviceId = null; // the device ID this client was created for - see ensureMqttClient
+let mqttLib = null;
+let mqttImportState = "idle"; // idle | loading | ready | failed
+
+function beginMqttImport() {
+  if (mqttImportState !== "idle") return;
+  mqttImportState = "loading";
+  import("mqtt")
+    .then((mod) => {
+      mqttLib = mod.default ?? mod;
+      mqttImportState = "ready";
+    })
+    .catch((e) => {
+      mqttImportState = "failed";
+      console.error("[mqtt] mqtt module unavailable - MQTT publishing disabled:", e.message);
+    });
+}
+
+// Lazily creates the MQTT client the first time a device ID is known (clientId = device ID per
+// the wire contract, so connecting before enrollment isn't meaningful) and MQTT_BROKER_URL is
+// configured. Idempotent - safe to call every collect() cycle; only does real work once, or again
+// if deviceCredentials.id ever changes (re-enrollment after a wipe - see the `deviceCredentials =
+// null` reset elsewhere), since the old client's clientId would otherwise be silently wrong.
+// mqtt.js is imported only when a broker URL is set - a normal HP/Dell/Lenovo install never
+// loads it, so a missing node_modules/mqtt cannot crash the agent.
+function ensureMqttClient(deviceId) {
+  if (!MQTT_BROKER_URL || !deviceId) return null;
+  if (mqttImportState === "failed") return null;
+  if (!mqttLib) {
+    beginMqttImport();
+    return null;
+  }
+  if (mqttClient && mqttClientDeviceId === deviceId) return mqttClient;
+
+  if (mqttClient) {
+    mqttClient.end(true);
+    mqttClient = null;
+  }
+  if (mqttReconnectTimer) {
+    clearTimeout(mqttReconnectTimer);
+    mqttReconnectTimer = null;
+  }
+
+  let key, cert, ca;
+  try {
+    key = MQTT_CLIENT_KEY_PATH ? fs.readFileSync(MQTT_CLIENT_KEY_PATH) : undefined;
+    cert = MQTT_CLIENT_CERT_PATH ? fs.readFileSync(MQTT_CLIENT_CERT_PATH) : undefined;
+    ca = MQTT_CA_CERT_PATH ? fs.readFileSync(MQTT_CA_CERT_PATH) : undefined;
+  } catch (e) {
+    console.error(`[mqtt] failed to read configured cert/key file - MQTT publishing disabled this run:`, e.message);
+    return null;
+  }
+
+  mqttClientDeviceId = deviceId;
+  mqttRetryMs = MQTT_INITIAL_RETRY_MS;
+  const client = mqttLib.connect(MQTT_BROKER_URL, {
+    clientId: deviceId,
+    key,
+    cert,
+    ca,
+    rejectUnauthorized: true,
+    reconnectPeriod: 0,
+  });
+
+  client.on("connect", () => {
+    console.log(`[mqtt] connected to ${MQTT_BROKER_URL} as ${deviceId}`);
+    mqttRetryMs = MQTT_INITIAL_RETRY_MS; // a real successful connect resets backoff for the next drop
+  });
+  client.on("error", (err) => {
+    console.error(`[mqtt] connection error:`, err.message);
+  });
+  // 'close' fires for both a failed initial connect and a later drop - reconnectPeriod: 0 above
+  // means mqtt.js won't retry either case on its own, so both are handled uniformly here. Guarded
+  // against a timer already pending so a burst of redundant 'close' events can't stack up
+  // multiple overlapping reconnect attempts.
+  client.on("close", () => {
+    if (mqttReconnectTimer) return;
+    console.log(`[mqtt] disconnected - retrying in ${mqttRetryMs}ms`);
+    mqttReconnectTimer = setTimeout(() => {
+      mqttReconnectTimer = null;
+      mqttRetryMs = Math.min(mqttRetryMs * 2, MQTT_MAX_RETRY_MS);
+      client.reconnect();
+    }, mqttRetryMs);
+  });
+
+  mqttClient = client;
+  return client;
+}
+
+// Fire-and-forget, exactly like postLiveStatus's own call site - a slow/stalled/down broker must
+// never affect collect()'s own timing or the HTTP path it runs alongside, not instead of. Silently
+// drops the publish (rather than queuing) when the client isn't currently connected - the next
+// collect() cycle 5s later carries a fresher snapshot anyway, so there is nothing worth queuing.
+function publishMqttLiveStatus(deviceId, fields) {
+  const client = ensureMqttClient(deviceId);
+  if (!client || !client.connected) return;
+  client.publish(`casterly/devices/${deviceId}/telemetry`, JSON.stringify(fields), { qos: 1 }, (err) => {
+    if (err) console.error(`[mqtt] publish failed:`, err.message);
+  });
+}
+
 // Calls ai-service's real GET /predict/:deviceId, forwarding this device's own real API key as
 // the exact same Bearer credential every other backend call here already uses - ai-service holds
 // no credential of its own (see its own app.py comment), it only ever relays this one request's
@@ -3982,23 +4153,32 @@ function mergeRustData(ps, rust) {
   }
 
   if (Array.isArray(rust.gpu) && rust.gpu.length > 0) {
-    // Additive overlay by Name, not a wholesale replace - same reasoning as storageHealth's own
-    // overlay below. Safe here because both PS ($gpu, Win32_VideoController) and rust query the
-    // identical WMI class with zero filtering on either side (unlike network, where PS excludes
-    // Tailscale/virtual adapters and rust doesn't - name-matching would be unreliable there).
-    // Necessary, not just cautious: rust's own Win32_VideoController struct has no DriverDate
-    // field at all, so the previous wholesale `ps.gpu = rust.gpu.map(...)` silently dropped
-    // DriverDate on every cycle rust succeeds - most of them - even after PS started collecting
-    // it. Existing ps.gpu fields survive via the spread; only Name/AdapterRAM/DriverVersion/
-    // AdapterCompatibility flip priority to rust, unchanged from before.
-    const existingGpuByName = new Map((Array.isArray(ps.gpu) ? ps.gpu : []).filter(Boolean).map((g) => [g.Name, g]));
-    ps.gpu = rust.gpu.map((g) => ({
-      ...(existingGpuByName.get(g.name) ?? {}),
-      Name: g.name,
-      AdapterRAM: g.adapterRAMBytes,
-      DriverVersion: g.driverVersion,
-      AdapterCompatibility: g.adapterCompatibility,
-    }));
+    // Union by display name. Rust used to replace the whole array, so a rust row with an empty
+    // Name (common on some Intel iGPU WMI instances) wiped PowerShell's "Intel UHD Graphics" and
+    // the UI showed Unknown GPU even though utilization still arrived from GPU Engine counters.
+    const psList = Array.isArray(ps.gpu) ? ps.gpu.filter(Boolean) : [];
+    const byKey = new Map();
+    const put = (g) => {
+      const key = String(g?.Name || "").trim().toLowerCase();
+      if (!key) return;
+      const prev = byKey.get(key) ?? {};
+      byKey.set(key, { ...prev, ...g, Name: g.Name || prev.Name });
+    };
+    for (const g of psList) put(g);
+    for (const g of rust.gpu) {
+      const existing = byKey.get(String(g.name || "").trim().toLowerCase()) ?? {};
+      const name = (g.name && String(g.name).trim()) || existing.Name || "";
+      if (!name) continue;
+      put({
+        ...existing,
+        Name: name,
+        AdapterRAM: g.adapterRAMUnreliable ? (existing.AdapterRAM ?? null) : (g.adapterRAMBytes ?? existing.AdapterRAM ?? null),
+        AdapterRAMUnreliable: Boolean(g.adapterRAMUnreliable || existing.AdapterRAMUnreliable),
+        DriverVersion: g.driverVersion || existing.DriverVersion,
+        AdapterCompatibility: g.adapterCompatibility || existing.AdapterCompatibility,
+      });
+    }
+    if (byKey.size > 0) ps.gpu = [...byKey.values()];
   }
 
   if (Array.isArray(rust.network) && rust.network.length > 0) {
@@ -4235,6 +4415,14 @@ async function collect() {
   }
   try {
     parsed.hardwareMonitor = mergeHwInfoIntoHardwareMonitor(hardwareMonitor, rustData?.hwinfo);
+    // Win32_Fan.DesiredSpeed is empty on this Dell but populated on some HP/Lenovo machines.
+    // Only used when LHM and HWiNFO both had no RPM - never overwrites a real sensor reading.
+    const wmiFanRpm = numOrNull(parsed.wmiFanRpm);
+    if (wmiFanRpm != null && parsed.hardwareMonitor && parsed.hardwareMonitor.fanRpm == null) {
+      parsed.hardwareMonitor.fanRpm = wmiFanRpm;
+    } else if (wmiFanRpm != null && !parsed.hardwareMonitor) {
+      parsed.hardwareMonitor = mergeHwInfoIntoHardwareMonitor(null, { fanRpm: wmiFanRpm });
+    }
     // HWiNFO-only facts with no LibreHardwareMonitor equivalent and no PS-side counterpart to
     // preserve - a genuinely new top-level field, not merged into hardwareMonitor's LHM-shaped
     // object, since collapsing per-core voltages into that shape's single cpuVoltage would be
@@ -4290,8 +4478,15 @@ async function collect() {
     // Fire-and-forget (not awaited) - see postLiveStatus's own comment on why this must never
     // hold up the next real hardware poll. deviceCredentials is read, not fetched here -
     // runBackendCycle's own registration flow (loadOrRegisterDevice) is what sets it.
+    //
+    // liveStatusFields is computed once and handed to both postLiveStatus (HTTP) and
+    // publishMqttLiveStatus (MQTT, when configured) - the Nexus One spec calls for MQTT to carry
+    // "the exact same JSON snapshot already sent via HTTP", which means sharing this one result,
+    // not calling extractLiveStatusFields twice and hoping the two happen to match.
     if (deviceCredentials) {
-      postLiveStatus(deviceCredentials, extractLiveStatusFields(parsed)).catch(() => {});
+      const liveStatusFields = extractLiveStatusFields(parsed);
+      postLiveStatus(deviceCredentials, liveStatusFields).catch(() => {});
+      publishMqttLiveStatus(deviceCredentials.id, liveStatusFields);
     }
   } catch (e) {
     cache = {

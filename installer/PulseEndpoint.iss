@@ -372,6 +372,33 @@ begin
     Result := Result + HEX_CHARS[(Ord(Buffer[i]) shr 4) + 1] + HEX_CHARS[(Ord(Buffer[i]) and $0F) + 1];
 end;
 
+// Real value (non-empty after trimming) for KeyName=... on its own line within Content - used
+// by WriteEnvLocal below to tell "an existing .env.local with real secrets" apart from one that
+// merely exists (e.g. left zero-byte/truncated by a previous install that died mid-write, or
+// missing a key because it predates one of these two being required). Line-anchored on '=' right
+// after KeyName rather than a plain substring search, since a bare Pos(KeyName, Content) would
+// also match KeyName appearing as part of a longer key name.
+function EnvKeyHasValue(const Content, KeyName: String): Boolean;
+var
+  Needle: String;
+  StartPos, EndPos: Integer;
+  Value: String;
+begin
+  Result := False;
+  Needle := KeyName + '=';
+  StartPos := Pos(Needle, Content);
+  if StartPos = 0 then
+    Exit;
+  StartPos := StartPos + Length(Needle);
+  EndPos := PosEx(#13, Content, StartPos);
+  if EndPos = 0 then
+    EndPos := PosEx(#10, Content, StartPos);
+  if EndPos = 0 then
+    EndPos := Length(Content) + 1;
+  Value := Copy(Content, StartPos, EndPos - StartPos);
+  Result := Trim(Value) <> '';
+end;
+
 // Writes a fresh .env.local with genuinely random secrets for this install, not the dev
 // placeholders checked into this repo's own backend/.env.local (which are the same known values
 // on every dev machine that's ever cloned this project - fine for local development, a real
@@ -385,18 +412,27 @@ end;
 // fix (see that file's own comment) - %ProgramData% is where its cwd actually ends up.
 procedure WriteEnvLocal();
 var
-  EnvContent: String;
-  DataDir: String;
+  EnvContent, DataDir, EnvPath, ExistingContent: String;
 begin
+  DataDir := ExpandConstant('{commonappdata}') + '\Pulse Endpoint\backend';
+  if not DirExists(DataDir) then
+    ForceDirectories(DataDir);
+  EnvPath := DataDir + '\.env.local';
+  // Upgrades must not overwrite an existing password - that left the running service hashed
+  // against the old value while the file had a new one, so Command Centre login always failed.
+  // Existence alone isn't enough of a check, though: a previous install that died mid-write can
+  // leave a zero-byte or truncated .env.local behind, and skipping regeneration against THAT
+  // would leave command-center.exe unable to start at all (mustEnv panics on either missing key -
+  // see main.go). Only actually skip when both required secrets are genuinely present.
+  if FileExists(EnvPath) and LoadStringFromFile(EnvPath, ExistingContent) and
+     EnvKeyHasValue(ExistingContent, 'JWT_SECRET') and EnvKeyHasValue(ExistingContent, 'ADMIN_PASSWORD') then
+    Exit;
   JwtSecret := GenerateRandomHex(32);
   AdminPassword := GenerateRandomHex(16);
   EnvContent := 'PORT=8443' + #13#10 +
     'JWT_SECRET=' + JwtSecret + #13#10 +
     'ADMIN_PASSWORD=' + AdminPassword + #13#10;
-  DataDir := ExpandConstant('{commonappdata}') + '\Pulse Endpoint\backend';
-  if not DirExists(DataDir) then
-    ForceDirectories(DataDir);
-  SaveStringToFile(DataDir + '\.env.local', EnvContent, False);
+  SaveStringToFile(EnvPath, EnvContent, False);
 end;
 
 // Writes pulse-agent.config.json with whatever backend URL the user entered - only for
@@ -440,6 +476,10 @@ begin
     '<configuration>' + #13#10 +
     '  <appSettings>' + #13#10 +
     '    <add key="runWebServerMenuItem" value="true" />' + #13#10 +
+    '    <add key="mainboardMenuItem" value="true" />' + #13#10 +
+    '    <add key="cpuMenuItem" value="true" />' + #13#10 +
+    '    <add key="gpuMenuItem" value="true" />' + #13#10 +
+    '    <add key="fanControllerMenuItem" value="true" />' + #13#10 +
     '  </appSettings>' + #13#10 +
     '</configuration>' + #13#10;
   SaveStringToFile(LhmDir + '\' + ConfigBaseName + '.config', ConfigContent, False);

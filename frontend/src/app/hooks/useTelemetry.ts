@@ -41,10 +41,11 @@ export type BatteryTelemetry = {
 };
 
 export type GpuTelemetry = {
-  Name: string;
-  AdapterRAM: number;
-  DriverVersion: string;
-  AdapterCompatibility: string;
+  Name?: string;
+  AdapterRAM?: number | null;
+  DriverVersion?: string;
+  AdapterCompatibility?: string;
+  AdapterRAMUnreliable?: boolean;
 };
 
 export type NetworkAdapterTelemetry = {
@@ -180,6 +181,8 @@ export type HardwareMonitorSnapshot = {
   // cpuTempC above. The worst-case core, not an average - one hot core throttles the whole
   // chip regardless of the others. null when LHM doesn't expose this on this hardware.
   cpuMinDistanceToTjMaxC: number | null;
+  // Hardware node Text from LHM (`/gpu-intel/0`, `/gpu-nvidia/0`, …) when WMI Name is empty.
+  gpuName?: string | null;
 } | null;
 
 export type HwInfoPerCoreVoltage = { label: string; volts: number };
@@ -374,8 +377,10 @@ export type UseTelemetryResult = TelemetryState & {
   isFirstLoad: boolean;
 };
 
-const TELEMETRY_URL = "http://localhost:4317/api/telemetry";
+const TELEMETRY_URL = "http://127.0.0.1:4317/api/telemetry";
 const POLL_MS = 5000;
+const FETCH_TIMEOUT_MS = 8000;
+const FIRST_LOAD_GIVE_UP_MS = 10000;
 
 // Real, persisted pause switch - the consolidated "Auto Monitoring" setting (Settings' old
 // Hardware Monitoring/Performance Metrics/Telemetry Data/Auto Monitoring were four decorative
@@ -448,7 +453,7 @@ try {
 // Real, durable event log via local-agent's proxy - see useAlertEngine.ts's postRealEvent for
 // the same pattern/reasoning (best-effort, browser never holds a device API key).
 function logTelemetryReconnected() {
-  fetch("http://localhost:4317/api/event", {
+  fetch("http://127.0.0.1:4317/api/event", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -473,6 +478,12 @@ export function useTelemetry() {
   // lives outside React state so every mounted instance can share and react to one real switch.
   const [enabled, setEnabled] = useState(telemetryEnabled);
   const timer = useRef<number | null>(null);
+  const [startupTimedOut, setStartupTimedOut] = useState(false);
+
+  useEffect(() => {
+    const t = window.setTimeout(() => setStartupTimedOut(true), FIRST_LOAD_GIVE_UP_MS);
+    return () => window.clearTimeout(t);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -483,8 +494,10 @@ export function useTelemetry() {
       // until handleEnabledChange's own `poll()` call (below) restarts it - not a busy-loop
       // that keeps checking the flag every POLL_MS while paused.
       if (!telemetryEnabled) return;
+      const controller = new AbortController();
+      const abortTimer = window.setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
       try {
-        const res = await fetch(TELEMETRY_URL, { cache: "no-store" });
+        const res = await fetch(TELEMETRY_URL, { cache: "no-store", signal: controller.signal });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const json = await res.json();
         // Read-then-set with no `await` in between - atomic with respect to every other
@@ -538,6 +551,7 @@ export function useTelemetry() {
           }));
         }
       } finally {
+        window.clearTimeout(abortTimer);
         // Also re-checks telemetryEnabled here, not just at poll()'s own top - it could have
         // been turned off while this exact fetch was still in flight; rescheduling anyway would
         // mean "paused" doesn't take effect until the in-flight request's own next tick.
@@ -589,5 +603,5 @@ export function useTelemetry() {
   // forever, since hasReceivedRealData can now genuinely never become true while paused - and
   // that startup screen blocks the whole app, including the one place (Settings) a user would
   // need to reach to turn monitoring back on. Being intentionally paused is not "still loading."
-  return { ...state, isFirstLoad: telemetryEnabled && !hasReceivedRealData, telemetryEnabled: enabled };
+  return { ...state, isFirstLoad: telemetryEnabled && !hasReceivedRealData && !startupTimedOut, telemetryEnabled: enabled };
 }
