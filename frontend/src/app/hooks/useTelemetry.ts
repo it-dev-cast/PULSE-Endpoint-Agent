@@ -121,6 +121,11 @@ export type StorageHealth = {
   };
   temperature?: {
     current?: number;
+    // The drive's own vendor-reported warning/critical points (NVMe Identify Controller's WCTEMP/
+    // CCTEMP, surfaced by smartctl as op_limit_max/critical_limit_max) - a real per-device value,
+    // not a guessed constant, used by getThermalRows' SSD row when present.
+    op_limit_max?: number;
+    critical_limit_max?: number;
   };
   // smartctl -a -j serial_number - the vendor serial (this Micron: 22163798620F), not
   // Win32_DiskDrive's NVMe NGUID (0000_0000_...EUI).

@@ -436,9 +436,25 @@ fn run_collect() {
         filters.insert("PhysicalAdapter".to_owned(), FilterValue::Bool(true));
         filters.insert("NetConnectionStatus".to_owned(), FilterValue::Number(2));
 
+        // Same name exclusion get-telemetry.ps1 applies client-side with -notmatch - PhysicalAdapter
+        // and NetConnectionStatus alone aren't enough: Tailscale's virtual adapter genuinely reports
+        // PhysicalAdapter=true and NetConnectionStatus=2 (Connected) on this machine, so it passes
+        // the WQL filter above and used to reach mergeRustData's wholesale ps.network replace,
+        // reintroducing exactly the tunnel/virtual adapter PS's own query had already filtered out.
+        // No WQL WHERE-clause equivalent for a substring exclusion exists via filtered_query's
+        // equality-only FilterValue, so this is applied client-side here too, same as PS's own
+        // Where-Object - not a WQL query, there either.
+        const EXCLUDED_NETWORK_NAME_SUBSTRINGS: [&str; 5] =
+            ["tailscale", "vethernet", "virtual", "bluetooth", "wan miniport"];
+        fn is_excluded_network_adapter_name(name: &str) -> bool {
+            let lower = name.to_lowercase();
+            EXCLUDED_NETWORK_NAME_SUBSTRINGS.iter().any(|s| lower.contains(s))
+        }
+
         match con.filtered_query::<Win32_NetworkAdapter>(&filters) {
             Ok(rows) => rows
                 .into_iter()
+                .filter(|a| !a.Name.as_deref().is_some_and(is_excluded_network_adapter_name))
                 .map(|a| {
                     json!({
                         "name": a.Name,

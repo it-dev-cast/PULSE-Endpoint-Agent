@@ -1561,8 +1561,6 @@ function StorageCard() {
 function ThermalCard() {
   const { thresholds } = useApp();
   const { data, connected } = useTelemetry();
-  const hwMon = connected ? data?.hardwareMonitor : null;
-  const fanRpm = hwMon?.fanRpm ?? null;
   const temps = getThermalRows(data, connected, thresholds.cpuTempWarning, thresholds.cpuTempCritical);
 
   // Real Normal/Warning/Critical from the worst real reading across CPU/GPU/SSD/Motherboard,
@@ -1583,19 +1581,6 @@ function ThermalCard() {
 
   return (
     <>
-      <style>{`
-        @keyframes thermalFanSpin {
-          from { transform: rotate(0deg); }
-          to { transform: rotate(360deg); }
-        }
-        .thermal-fan {
-          transform-origin: center;
-        }
-        .thermal-fan.is-spinning {
-          animation: thermalFanSpin 1.8s linear infinite;
-        }
-      `}</style>
-
       <div
         className="clpa-card-hover rounded-2xl cursor-default"
         style={{
@@ -1619,50 +1604,19 @@ function ThermalCard() {
           <StatusBadge label={thermalBadgeLabel} sample={thermalBadgeSample} />
         </div>
 
-        <div className="flex items-center gap-3 mb-2.5">
-          <div className="flex-1 flex flex-col gap-1.5">
-            {temps.map((t, i) => (
-              <div key={i} className="flex items-center gap-2">
-                <span style={{ width: 68, fontSize: 9.5, color: "var(--clpa-muted)" }}>{t.label}</span>
-                <div style={{ flex: 1, height: 6, borderRadius: 999, background: "var(--clpa-surface-border)", overflow: "hidden" }}>
-                  <div style={{ width: `${t.pct}%`, height: "100%", borderRadius: 999, background: t.color }} />
-                </div>
-                <div className="flex items-center gap-1 flex-shrink-0" style={{ minWidth: 32, justifyContent: "flex-end" }}>
-                  <span style={{ textAlign: "right", fontSize: 9.5, fontWeight: 600, color: "var(--clpa-body)" }}>{t.value}</span>
-                  {t.sample && <SampleTag />}
-                </div>
+        <div className="flex flex-col gap-1.5 mb-2.5">
+          {temps.map((t, i) => (
+            <div key={i} className="flex items-center gap-2">
+              <span style={{ width: 68, fontSize: 9.5, color: "var(--clpa-muted)" }}>{t.label}</span>
+              <div style={{ flex: 1, height: 6, borderRadius: 999, background: "var(--clpa-surface-border)", overflow: "hidden" }}>
+                <div style={{ width: `${t.pct}%`, height: "100%", borderRadius: 999, background: t.color }} />
               </div>
-            ))}
-          </div>
-
-          <div className="flex flex-col items-center flex-shrink-0" style={{ width: 72 }}>
-            <div
-              style={{
-                width: 54, height: 54, borderRadius: "50%",
-                background: "linear-gradient(145deg,var(--clpa-surface),var(--clpa-input-border))",
-                display: "flex", alignItems: "center", justifyContent: "center",
-                border: "1px solid var(--clpa-input-border)",
-              }}
-            >
-              <svg className={`thermal-fan${fanRpm != null ? " is-spinning" : ""}`} width="40" height="40" viewBox="0 0 100 100">
-                <circle cx="50" cy="50" r="10" fill="var(--clpa-body-alt)" />
-                {[0, 90, 180, 270].map((rot) => (
-                  <path key={rot} d="M50 15 C75 15,75 40,58 48" fill="var(--clpa-body)" transform={`rotate(${rot} 50 50)`} />
-                ))}
-                <circle cx="50" cy="50" r="5" fill="var(--clpa-subtle)" />
-              </svg>
+              <div className="flex items-center gap-1 flex-shrink-0" style={{ minWidth: 32, justifyContent: "flex-end" }}>
+                <span style={{ textAlign: "right", fontSize: 9.5, fontWeight: 600, color: "var(--clpa-body)" }}>{t.value}</span>
+                {t.sample && <SampleTag />}
+              </div>
             </div>
-            {/* RPM from LibreHardwareMonitor (any fan sensor), HWiNFO (any Fan-type reading),
-                or Win32_Fan.DesiredSpeed. Null when none of those expose a tachometer - common
-                on thin laptops whose EC is not mapped in LHM (this Dell's "Dell 0DPVMT" node
-                has zero child sensors). Never invented. */}
-            <div style={{ marginTop: 6, fontSize: 16, fontWeight: 800, color: "var(--clpa-title)" }}>
-              {fanRpm != null ? Math.round(fanRpm).toLocaleString() : "—"}
-            </div>
-            <div className="flex items-center gap-1">
-              <span style={{ fontSize: 9, color: "var(--clpa-muted)" }}>{fanRpm != null ? "RPM" : "No fan sensor"}</span>
-            </div>
-          </div>
+          ))}
         </div>
 
         <div style={{ borderTop: "1px solid var(--clpa-divider)", paddingTop: 9 }}>

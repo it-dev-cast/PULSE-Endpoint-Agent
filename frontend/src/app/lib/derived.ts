@@ -381,9 +381,32 @@ function thermalTempRow(label: string, tempC: number | null, warning: number, cr
   };
 }
 
-export function getThermalRows(data: Snapshot, connected: boolean, warning: number, critical: number): ThermalRow[] {
+// GPU/DIMM/Motherboard have no per-device vendor threshold available in this project's telemetry
+// (unlike SSD below), so these are fixed, sensor-appropriate defaults rather than CPU's own
+// warning/critical reused across every sensor type - real mobile-GPU throttle points are commonly
+// ~87C (80/90 leaves headroom before that), DIMM/PCH modules are conservatively rated well under
+// their DDR spec max for a laptop chassis.
+const GPU_TEMP_WARNING_C = 80;
+const GPU_TEMP_CRITICAL_C = 90;
+const DIMM_TEMP_WARNING_C = 70;
+const DIMM_TEMP_CRITICAL_C = 85;
+const SSD_TEMP_WARNING_C_FALLBACK = 70;
+const SSD_TEMP_CRITICAL_C_FALLBACK = 80;
+
+// smartctl surfaces the NVMe drive's own Identify Controller WCTEMP/CCTEMP fields as
+// op_limit_max/critical_limit_max - a real, per-device vendor-specified threshold, not a guess.
+// Falls back to a conservative static default only when a drive doesn't report them.
+function ssdThermalThresholds(data: Snapshot): { warning: number; critical: number } {
+  const t = data?.storageHealth?.temperature;
+  return {
+    warning: t?.op_limit_max ?? SSD_TEMP_WARNING_C_FALLBACK,
+    critical: t?.critical_limit_max ?? SSD_TEMP_CRITICAL_C_FALLBACK,
+  };
+}
+
+export function getThermalRows(data: Snapshot, connected: boolean, cpuWarning: number, cpuCritical: number): ThermalRow[] {
   if (!connected) {
-    return ["CPU Temp", "GPU Temp", "SSD Temp", "Motherboard"].map((label) => thermalTempRow(label, null, warning, critical));
+    return ["CPU Temp", "GPU Temp", "SSD Temp", "Motherboard"].map((label) => thermalTempRow(label, null, cpuWarning, cpuCritical));
   }
   const hwMon = data?.hardwareMonitor;
   const cpuTempC = hwMon?.cpuTempC ?? null;
@@ -393,23 +416,24 @@ export function getThermalRows(data: Snapshot, connected: boolean, warning: numb
   const ssdTempC = data?.storageHealth?.temperature?.current ?? null;
   const hasLabeled = [cpuTempC, gpuTempC, ssdTempC, moboTempC, dimmTempC].some((t) => t != null);
   if (hasLabeled) {
+    const ssd = ssdThermalThresholds(data);
     return [
-      thermalTempRow("CPU Temp", cpuTempC, warning, critical),
-      thermalTempRow("GPU Temp", gpuTempC, warning, critical),
-      thermalTempRow("SSD Temp", ssdTempC, warning, critical),
+      thermalTempRow("CPU Temp", cpuTempC, cpuWarning, cpuCritical),
+      thermalTempRow("GPU Temp", gpuTempC, GPU_TEMP_WARNING_C, GPU_TEMP_CRITICAL_C),
+      thermalTempRow("SSD Temp", ssdTempC, ssd.warning, ssd.critical),
       moboTempC != null
-        ? thermalTempRow("Motherboard", moboTempC, warning, critical)
-        : thermalTempRow(dimmTempC != null ? "DIMM Temp" : "Motherboard", dimmTempC, warning, critical),
+        ? thermalTempRow("Motherboard", moboTempC, DIMM_TEMP_WARNING_C, DIMM_TEMP_CRITICAL_C)
+        : thermalTempRow(dimmTempC != null ? "DIMM Temp" : "Motherboard", dimmTempC, DIMM_TEMP_WARNING_C, DIMM_TEMP_CRITICAL_C),
     ];
   }
   const zones = (data?.thermal ?? [])
     .map((zone, i) => {
       const c = acpiCurrentTemperatureToC(zone?.CurrentTemperature);
-      return c == null ? null : thermalTempRow(`Zone ${i + 1}`, c, warning, critical);
+      return c == null ? null : thermalTempRow(`Zone ${i + 1}`, c, cpuWarning, cpuCritical);
     })
     .filter((row): row is ThermalRow => row != null);
   if (zones.length > 0) return zones;
-  return ["CPU Temp", "GPU Temp", "SSD Temp", "Motherboard"].map((label) => thermalTempRow(label, null, warning, critical));
+  return ["CPU Temp", "GPU Temp", "SSD Temp", "Motherboard"].map((label) => thermalTempRow(label, null, cpuWarning, cpuCritical));
 }
 
 export function getStorageBadge(data: Snapshot, connected: boolean): Badge {
