@@ -378,7 +378,22 @@ end;
 // missing a key because it predates one of these two being required). Line-anchored on '=' right
 // after KeyName rather than a plain substring search, since a bare Pos(KeyName, Content) would
 // also match KeyName appearing as part of a longer key name.
-function EnvKeyHasValue(const Content, KeyName: String): Boolean;
+// Inno Setup's Pascal Script has no PosEx - Pos always searches from the string's start, so
+// finding the line terminator AFTER StartPos means searching within the tail substring instead
+// and translating the result back to a Content-relative index.
+function FindFrom(const S: AnsiString; const SubStr: String; StartPos: Integer): Integer;
+var
+  P: Integer;
+begin
+  Result := 0;
+  if StartPos > Length(S) then
+    Exit;
+  P := Pos(SubStr, Copy(S, StartPos, Length(S) - StartPos + 1));
+  if P > 0 then
+    Result := P + StartPos - 1;
+end;
+
+function EnvKeyHasValue(const Content: AnsiString; const KeyName: String): Boolean;
 var
   Needle: String;
   StartPos, EndPos: Integer;
@@ -390,9 +405,9 @@ begin
   if StartPos = 0 then
     Exit;
   StartPos := StartPos + Length(Needle);
-  EndPos := PosEx(#13, Content, StartPos);
+  EndPos := FindFrom(Content, #13, StartPos);
   if EndPos = 0 then
-    EndPos := PosEx(#10, Content, StartPos);
+    EndPos := FindFrom(Content, #10, StartPos);
   if EndPos = 0 then
     EndPos := Length(Content) + 1;
   Value := Copy(Content, StartPos, EndPos - StartPos);
@@ -412,7 +427,8 @@ end;
 // fix (see that file's own comment) - %ProgramData% is where its cwd actually ends up.
 procedure WriteEnvLocal();
 var
-  EnvContent, DataDir, EnvPath, ExistingContent: String;
+  EnvContent, DataDir, EnvPath: String;
+  ExistingContent: AnsiString;
 begin
   DataDir := ExpandConstant('{commonappdata}') + '\Pulse Endpoint\backend';
   if not DirExists(DataDir) then
