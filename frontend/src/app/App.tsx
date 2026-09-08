@@ -1560,6 +1560,12 @@ function ThermalCard() {
   const { thresholds } = useApp();
   const { data, connected } = useTelemetry();
   const temps = getThermalRows(data, connected, thresholds.cpuTempWarning, thresholds.cpuTempCritical);
+  // RPM from LibreHardwareMonitor (any fan sensor), HWiNFO (any Fan-type reading), or
+  // Win32_Fan.DesiredSpeed - null on hardware none of those expose a tachometer for (e.g. this
+  // Dell's "Dell 0DPVMT" LHM node has zero child sensors). The whole fan row below is hidden
+  // rather than shown as a dead placeholder when that's the case - never invented, and never
+  // hidden on hardware that genuinely does report one.
+  const fanRpm = connected ? data?.hardwareMonitor?.fanRpm ?? null : null;
 
   // Real Normal/Warning/Critical from the worst real reading across CPU/GPU/SSD/Motherboard,
   // against useAlertEngine's own live cpu-temp thresholds (reused here since there's no separate
@@ -1579,6 +1585,19 @@ function ThermalCard() {
 
   return (
     <>
+      {fanRpm != null && (
+        <style>{`
+          @keyframes thermalFanSpin {
+            from { transform: rotate(0deg); }
+            to { transform: rotate(360deg); }
+          }
+          .thermal-fan {
+            transform-origin: center;
+            animation: thermalFanSpin 1.8s linear infinite;
+          }
+        `}</style>
+      )}
+
       <div
         className="clpa-card-hover rounded-2xl cursor-default"
         style={{
@@ -1602,19 +1621,48 @@ function ThermalCard() {
           <StatusBadge label={thermalBadgeLabel} sample={thermalBadgeSample} />
         </div>
 
-        <div className="flex flex-col gap-1.5 mb-2.5">
-          {temps.map((t, i) => (
-            <div key={i} className="flex items-center gap-2">
-              <span style={{ width: 68, fontSize: 9.5, color: "var(--clpa-muted)" }}>{t.label}</span>
-              <div style={{ flex: 1, height: 6, borderRadius: 999, background: "var(--clpa-surface-border)", overflow: "hidden" }}>
-                <div style={{ width: `${t.pct}%`, height: "100%", borderRadius: 999, background: t.color }} />
+        <div className="flex items-center gap-3 mb-2.5">
+          <div className="flex-1 flex flex-col gap-1.5">
+            {temps.map((t, i) => (
+              <div key={i} className="flex items-center gap-2">
+                <span style={{ width: 68, fontSize: 9.5, color: "var(--clpa-muted)" }}>{t.label}</span>
+                <div style={{ flex: 1, height: 6, borderRadius: 999, background: "var(--clpa-surface-border)", overflow: "hidden" }}>
+                  <div style={{ width: `${t.pct}%`, height: "100%", borderRadius: 999, background: t.color }} />
+                </div>
+                <div className="flex items-center gap-1 flex-shrink-0" style={{ minWidth: 32, justifyContent: "flex-end" }}>
+                  <span style={{ textAlign: "right", fontSize: 9.5, fontWeight: 600, color: "var(--clpa-body)" }}>{t.value}</span>
+                  {t.sample && <SampleTag />}
+                </div>
               </div>
-              <div className="flex items-center gap-1 flex-shrink-0" style={{ minWidth: 32, justifyContent: "flex-end" }}>
-                <span style={{ textAlign: "right", fontSize: 9.5, fontWeight: 600, color: "var(--clpa-body)" }}>{t.value}</span>
-                {t.sample && <SampleTag />}
+            ))}
+          </div>
+
+          {fanRpm != null && (
+            <div className="flex flex-col items-center flex-shrink-0" style={{ width: 72 }}>
+              <div
+                style={{
+                  width: 54, height: 54, borderRadius: "50%",
+                  background: "linear-gradient(145deg,var(--clpa-surface),var(--clpa-input-border))",
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  border: "1px solid var(--clpa-input-border)",
+                }}
+              >
+                <svg className="thermal-fan" width="40" height="40" viewBox="0 0 100 100">
+                  <circle cx="50" cy="50" r="10" fill="var(--clpa-body-alt)" />
+                  {[0, 90, 180, 270].map((rot) => (
+                    <path key={rot} d="M50 15 C75 15,75 40,58 48" fill="var(--clpa-body)" transform={`rotate(${rot} 50 50)`} />
+                  ))}
+                  <circle cx="50" cy="50" r="5" fill="var(--clpa-subtle)" />
+                </svg>
+              </div>
+              <div style={{ marginTop: 6, fontSize: 16, fontWeight: 800, color: "var(--clpa-title)" }}>
+                {Math.round(fanRpm).toLocaleString()}
+              </div>
+              <div className="flex items-center gap-1">
+                <span style={{ fontSize: 9, color: "var(--clpa-muted)" }}>RPM</span>
               </div>
             </div>
-          ))}
+          )}
         </div>
 
         <div style={{ borderTop: "1px solid var(--clpa-divider)", paddingTop: 9 }}>
