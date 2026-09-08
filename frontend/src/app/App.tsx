@@ -47,6 +47,7 @@ import {
   getMemUsedPercent,
   getPerformanceScore,
   getTpmStatus,
+  getOverallProtectionTier,
   getSecurityHealthPercent,
   getSecurityCompliance,
   describeSecuritySignals,
@@ -530,22 +531,18 @@ function SupportChatWidget({
 // ─── Title Bar ────────────────────────────────────────────
 function TitleBar() {
   const { data, connected } = useTelemetry();
+  const { thresholds } = useApp();
   const agentUpdate = useAgentUpdate(APP_VERSION);
 
-  // Same real signals HWIntegrityCard checks (TPM attestation, Secure Boot, BitLocker) - reused
-  // here rather than re-derived, so this badge can't honestly disagree with that card. Each is
-  // independently null when unavailable (no elevation, non-UEFI, non-Pro Windows, etc.), which
-  // is common enough that "connected" alone isn't enough to earn a security claim like this.
-  const { tpmReal, tpmActive } = getTpmStatus(data, connected);
-  const secureBootEnabled = connected ? data?.secureBootEnabled ?? null : null;
-  const bitlockerStatus = connected ? data?.bitlockerStatus ?? null : null;
-  const securityChecks = [
-    tpmReal ? tpmActive : null,
-    secureBootEnabled,
-    bitlockerStatus != null ? bitlockerStatus === "On" : null,
-  ].filter((v): v is boolean => v != null);
-  const anySecuritySignalReal = securityChecks.length > 0;
-  const allRealSignalsOk = securityChecks.every(Boolean);
+  // Worst-signal-wins across TPM/Secure Boot/BitLocker (same signals HWIntegrityCard checks) plus
+  // Battery and Storage's own existing card badges - see getOverallProtectionTier's own comment
+  // for why security alone can only ever reach "At Risk", never "Critical".
+  const { tier: protectionTier, anyReal: anyProtectionSignalReal } = getOverallProtectionTier(
+    data,
+    connected,
+    thresholds.batteryHealthWarning,
+    thresholds.batteryHealthCritical,
+  );
 
   let protectionLabel: string;
   let protectionDotColor: string;
@@ -561,15 +558,16 @@ function TitleBar() {
     protectionLabel = "OFFLINE";
     protectionDotColor = "#EF4444";
     protectionTextColor = "#F87171";
-  } else if (anySecuritySignalReal) {
-    protectionLabel = allRealSignalsOk ? "PROTECTED" : "AT RISK";
-    protectionDotColor = allRealSignalsOk ? "#22C55E" : "#F59E0B";
-    protectionTextColor = allRealSignalsOk ? "#4ADE80" : "#FBBF24";
+  } else if (anyProtectionSignalReal) {
+    protectionLabel = protectionTier === "Critical" ? "CRITICAL" : protectionTier === "At Risk" ? "AT RISK" : "HEALTHY";
+    protectionDotColor = protectionTier === "Critical" ? "#EF4444" : protectionTier === "At Risk" ? "#F59E0B" : "#22C55E";
+    protectionTextColor = protectionTier === "Critical" ? "#F87171" : protectionTier === "At Risk" ? "#FBBF24" : "#4ADE80";
   } else {
-    // Connected, but none of TPM/Secure Boot/BitLocker could actually be checked - keep the
-    // original "PROTECTED" look rather than inventing a new label, but disclose it's unverified
-    // instead of silently asserting it, same as every other real-or-sample value in this app.
-    protectionLabel = "PROTECTED";
+    // Connected, but none of the 5 signals (TPM/Secure Boot/BitLocker/Battery/Storage) could
+    // actually be checked - keep the original "Healthy" look rather than inventing a new label,
+    // but disclose it's unverified instead of silently asserting it, same as every other
+    // real-or-sample value in this app.
+    protectionLabel = "HEALTHY";
     protectionDotColor = "#22C55E";
     protectionTextColor = "#4ADE80";
     protectionSample = true;

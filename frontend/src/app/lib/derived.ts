@@ -458,6 +458,50 @@ export function getBatteryHealthBadge(data: Snapshot, connected: boolean, warnin
   return { label: healthPct < critical ? "Poor" : healthPct < warning ? "Fair" : "Good", sample: false };
 }
 
+export type OverallProtectionTier = "Healthy" | "At Risk" | "Critical";
+
+// Title-bar badge: folds the same 3 security signals it already checked (TPM/Secure Boot/
+// BitLocker) together with Battery and Storage's own existing card-level badges - not new
+// thresholds, the exact same getBatteryHealthBadge/getStorageBadge every other caller uses -
+// into one worst-signal-wins tier. Same principle as getThermalCardBadge (worst temp reading
+// decides Critical/Warning/Normal) and the AI Health Score card (label follows the weakest
+// sub-score). Security can only ever contribute "middle" (At Risk), never "worst" (Critical) -
+// there is no existing precedent in this app for a security state beyond the historical binary
+// PROTECTED/AT RISK, so this doesn't invent a new one just to fill the Critical cell.
+export function getOverallProtectionTier(
+  data: Snapshot,
+  connected: boolean,
+  batteryHealthWarning: number,
+  batteryHealthCritical: number,
+): { tier: OverallProtectionTier; anyReal: boolean } {
+  const tiers: Array<"fine" | "middle" | "worst"> = [];
+
+  const { tpmReal, tpmActive } = getTpmStatus(data, connected);
+  const secureBootEnabled = connected ? data?.secureBootEnabled ?? null : null;
+  const bitlockerStatus = connected ? data?.bitlockerStatus ?? null : null;
+  for (const ok of [
+    tpmReal ? tpmActive : null,
+    secureBootEnabled,
+    bitlockerStatus != null ? bitlockerStatus === "On" : null,
+  ]) {
+    if (ok != null) tiers.push(ok ? "fine" : "middle");
+  }
+
+  const batteryBadge = getBatteryHealthBadge(data, connected, batteryHealthWarning, batteryHealthCritical);
+  if (!batteryBadge.sample) {
+    tiers.push(batteryBadge.label === "Poor" ? "worst" : batteryBadge.label === "Fair" ? "middle" : "fine");
+  }
+
+  const storageBadge = getStorageBadge(data, connected);
+  if (!storageBadge.sample) {
+    tiers.push(storageBadge.label === "Critical" ? "worst" : storageBadge.label === "Warning" ? "middle" : "fine");
+  }
+
+  const anyReal = tiers.length > 0;
+  const tier: OverallProtectionTier = tiers.includes("worst") ? "Critical" : tiers.includes("middle") ? "At Risk" : "Healthy";
+  return { tier, anyReal };
+}
+
 // Hard hex traffic-light (green / yellow / red) - not theme CSS variables, so a Fair/Poor
 // health % cannot inherit the card's charge-green or resolve to the wrong token.
 export const HEALTH_TRAFFIC = {
