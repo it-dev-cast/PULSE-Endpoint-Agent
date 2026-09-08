@@ -1615,13 +1615,14 @@ function ThermalCard() {
       )}
 
       <div
-        className="clpa-card-hover rounded-2xl cursor-default"
+        className="clpa-card-hover rounded-2xl cursor-default flex flex-col"
         style={{
           background: "var(--clpa-card)",
           border: "1px solid var(--clpa-card-border)",
           boxShadow: "0 2px 8px rgba(0,0,0,0.06)",
           padding: "12px 14px",
           height: "100%",
+          minHeight: 0,
         }}
       >
         <div className="flex items-center justify-between mb-2.5">
@@ -1670,7 +1671,7 @@ function ThermalCard() {
           <div className="flex flex-col gap-1.5 mb-2.5">{tempRows}</div>
         )}
 
-        <div style={{ borderTop: "1px solid var(--clpa-divider)", paddingTop: 9 }}>
+        <div style={{ borderTop: "1px solid var(--clpa-divider)", paddingTop: 9, marginTop: "auto" }}>
           <div className="flex items-center gap-2">
             <CheckCircle2 size={12} color={coolingFooter.color} />
             <span style={{ fontSize: 10, color: "var(--clpa-muted)", fontWeight: 500 }}>{coolingFooter.text}</span>
