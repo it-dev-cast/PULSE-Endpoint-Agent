@@ -133,13 +133,6 @@
 /* State (connection status, pause/resume, etc.) must never rely on animation alone - the color/
    label/icon changes already carry that meaning without motion, so it's safe to fully disable
    the decorative pulse/spin for users who've asked the OS not to animate things. */
-/* Auto-lock on idle overlay - fades in/out; the lock state itself is always conveyed by content
-   (the message + button), never by the animation alone, so reduced-motion below just drops the
-   transition and shows/hides instantly. */
-.clpa-lock-overlay {
-  transition: opacity 0.18s ease;
-}
-
 @media (prefers-reduced-motion: reduce) {
   .clpa-dot {
     animation: none;
@@ -150,10 +143,6 @@
   }
 
   .clpa-card-hover {
-    transition: none;
-  }
-
-  .clpa-lock-overlay {
     transition: none;
   }
 }

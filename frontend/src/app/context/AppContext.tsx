@@ -8,7 +8,6 @@ import { formatTimeLabel, setTimeFormatPref, setDateFormatPref } from "../lib/da
 import { setTheme } from "../hooks/useTheme";
 import { setDensity } from "../hooks/useDensity";
 import { setAccentColor } from "../hooks/useAccentColor";
-import { setIdleLockEnabled, setIdleLockTimeoutMinutes } from "../hooks/useIdleLock";
 import { setTelemetryEnabled } from "../hooks/useTelemetry";
 import { askCasterlySupport } from "../lib/supportChat";
 
@@ -256,8 +255,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
     setTheme("light");
     setDensity("comfortable");
     setAccentColor(null);
-    setIdleLockEnabled(true);
-    setIdleLockTimeoutMinutes(30);
     setTimeFormatPref("12h");
     setDateFormatPref("DD MMM YYYY");
     setTelemetryEnabled(true);

@@ -20,8 +20,6 @@ export const RESET_AGENT_LOCAL_STORAGE_KEYS = [
   "clpa:settings:sound-critical:v1",
   "clpa:settings:accent-color:v1",
   "clpa:settings:density:v1",
-  "clpa:settings:idle-lock-enabled:v1",
-  "clpa:settings:idle-lock-timeout-minutes:v1",
   "clpa:settings:telemetry-enabled:v1",
   "clpa:settings:theme:v1",
   "clpa:settings:time-format:v1",

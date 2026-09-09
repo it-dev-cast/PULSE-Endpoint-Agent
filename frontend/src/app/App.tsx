@@ -8,7 +8,6 @@ import { useEventHistory } from "./hooks/useEventHistory";
 import { useTheme } from "./hooks/useTheme";
 import { useDensity } from "./hooks/useDensity";
 import { useAccentColor, ACCENT_PRESETS } from "./hooks/useAccentColor";
-import { useIdleLockState, useIdleLockSettings, IDLE_TIMEOUT_PRESETS_MINUTES } from "./hooks/useIdleLock";
 import { useHighImpactAction, type HighImpactState } from "./hooks/useHighImpactAction";
 import { clearResetAgentLocalStorage } from "./lib/resetAgent";
 import {
@@ -80,7 +79,7 @@ import {
   ChevronDown, Zap, Activity, CheckCircle2, Clock, TrendingDown, Search,
   MonitorCheck, MemoryStick, Database, Layers,
   Radio, Globe, Package, Fingerprint, BarChart3, MessageCircle, Send,
-  Gauge, Wind, Plug, Hash, Tag, Minus, Square, X, EyeOff, Lock, Unlock, Trash2
+  Gauge, Wind, Plug, Hash, Tag, Minus, Square, X, EyeOff, Lock, Trash2
 } from "lucide-react";
 import { AppProvider, useApp, type QuietHours } from "./context/AppContext";
 import ScreenSharePOC from "./remote-poc/ScreenSharePOC";
@@ -169,66 +168,6 @@ function PageScrollArea({ activeScreen, children }: { activeScreen: string; chil
   );
 }
 
-// Real "Auto-lock on idle" overlay (see useIdleLock.ts for the tracking mechanism/scoping
-// decision). Deliberately honest about what it is: no PIN/password system exists anywhere in
-// this app (Settings' "PIN for remote sessions" is still its own, separately unbuilt control) -
-// this is an inactivity screen the user dismisses, not an authentication gate, and says so
-// rather than implying it verifies who's actually at the keyboard.
-function LockOverlay({ onUnlock }: { onUnlock: () => void }) {
-  return (
-    <div
-      className="clpa-lock-overlay flex items-center justify-center"
-      style={{
-        position: "absolute",
-        // Starts below TitleBar (36px), not at the very top - the window should stay movable/
-        // minimizable/closable while locked, same principle StartupLoadingScreen already
-        // follows for the equivalent "TitleBar always renders regardless" reason.
-        top: 36,
-        left: 0,
-        right: 0,
-        bottom: 0,
-        background: "rgba(6,10,18,0.72)",
-        backdropFilter: "blur(6px)",
-        WebkitBackdropFilter: "blur(6px)",
-        zIndex: 500,
-      }}
-    >
-      <div
-        className="flex flex-col items-center text-center"
-        style={{
-          background: "var(--clpa-card)",
-          border: "1px solid var(--clpa-card-border)",
-          borderRadius: 16,
-          padding: "28px 32px",
-          boxShadow: "0 20px 60px rgba(0,0,0,0.4)",
-          maxWidth: 320,
-        }}
-      >
-        <div
-          className="flex items-center justify-center rounded-full"
-          style={{ width: 48, height: 48, background: "rgba(var(--clpa-subtle-rgb),0.14)", marginBottom: 14 }}
-        >
-          <Lock size={22} style={{ color: "var(--clpa-muted)" }} strokeWidth={1.8} />
-        </div>
-        <div style={{ fontSize: 14, fontWeight: 800, color: "var(--clpa-title)", marginBottom: 4 }}>
-          Locked due to inactivity
-        </div>
-        <div style={{ fontSize: 10.5, color: "var(--clpa-muted)", lineHeight: 1.5, marginBottom: 18 }}>
-          This just re-shows the app - it doesn't verify who's at the keyboard.
-        </div>
-        <button
-          onClick={onUnlock}
-          className="clpa-focusable flex items-center gap-1.5"
-          style={{ background: "var(--clpa-primary)", border: "none", borderRadius: 8, padding: "8px 18px", cursor: "pointer" }}
-        >
-          <Unlock size={13} color="#FFFFFF" strokeWidth={2.2} />
-          <span style={{ fontSize: 11, fontWeight: 700, color: "#FFFFFF" }}>Click to unlock</span>
-        </button>
-      </div>
-    </div>
-  );
-}
-
 function AppShell() {
   const { activeScreen, supportChatOpen, toggleSupportChat } = useApp();
   // Real gate (see useTelemetry's own isFirstLoad comment) - true until the first genuinely
@@ -237,7 +176,6 @@ function AppShell() {
   // TitleBar still renders regardless - the window should stay movable/minimizable/closable
   // immediately, not wait on data.
   const { isFirstLoad } = useTelemetry();
-  const { locked, unlock } = useIdleLockState();
 
   return (
     <>
@@ -305,7 +243,6 @@ function AppShell() {
               <SupportChatWidget isOpen={supportChatOpen} onToggle={toggleSupportChat} />
             </>
           )}
-          {locked && !isFirstLoad && <LockOverlay onUnlock={unlock} />}
         </div>
       </div>
     </>
@@ -6583,7 +6520,6 @@ function SSContent({ section }: { section: string }) {
   // UI actually lives, not squeezed into this compact quick-actions tile.
   const fullReset = useHighImpactAction("full-reset");
   const { accent, setAccentColor } = useAccentColor();
-  const { enabled: idleLockEnabled, timeoutMinutes: idleTimeoutMinutes, setEnabled: setIdleLockEnabled, setTimeoutMinutes: setIdleTimeoutMinutes } = useIdleLockSettings();
   const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
   const language = navigator.language;
   // Real, persisted preferences (lib/dateTimeFormat.ts) - local useState only so this specific
@@ -6747,8 +6683,6 @@ function SSContent({ section }: { section: string }) {
       quietHours,
       groupSimilarAlertsEnabled,
       prioritySortingEnabled,
-      idleLockEnabled,
-      idleTimeoutMinutes,
       telemetryEnabled,
       timeFormat: timeFormatPref,
       dateFormat: dateFormatPref,
@@ -6933,25 +6867,6 @@ function SSContent({ section }: { section: string }) {
             label="Tamper detection"
             checked={categoryPrefs.Security}
             onToggle={(v) => { setCategoryEnabled("Security", v); onChange(); }}
-          />
-        </SCard>
-        <SCard>
-          <SHead title="Access Control" />
-          <SToggle
-            label="Auto-lock on idle"
-            checked={idleLockEnabled}
-            onToggle={(v) => { setIdleLockEnabled(v); onChange(); }}
-          />
-          <SField
-            label="Session timeout"
-            value={`${idleTimeoutMinutes} minutes`}
-            type="select"
-            onClick={() => {
-              const currentIdx = IDLE_TIMEOUT_PRESETS_MINUTES.indexOf(idleTimeoutMinutes as (typeof IDLE_TIMEOUT_PRESETS_MINUTES)[number]);
-              const next = IDLE_TIMEOUT_PRESETS_MINUTES[(currentIdx + 1) % IDLE_TIMEOUT_PRESETS_MINUTES.length];
-              setIdleTimeoutMinutes(next);
-              onChange();
-            }}
           />
         </SCard>
         <SCard>

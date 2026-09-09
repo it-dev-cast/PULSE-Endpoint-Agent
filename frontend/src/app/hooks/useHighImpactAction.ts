@@ -12,7 +12,7 @@ import { useEffect, useState } from "react";
 // their content on switch (SSContent's ternary), so a request made from the General tab's
 // "Reset Agent" tile has to still be checkable after switching to the Automation tab's
 // "High-Impact Actions" card, which is a different component instance entirely. Same shared-
-// state-across-instances shape as useTheme.ts/useIdleLock.ts.
+// state-across-instances shape as useTheme.ts.
 export type HighImpactPhase = "idle" | "requesting" | "pending" | "checking" | "executed" | "verification-failed" | "rejected" | "error";
 export type HighImpactState = { requestId: string | null; phase: HighImpactPhase; detail: string | null };
 
