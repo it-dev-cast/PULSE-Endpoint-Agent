@@ -3915,7 +3915,7 @@ function HWDistributionCard() {
           <div
             key={i}
             className="rounded-lg flex flex-col justify-center"
-            style={{ background: `${d.iconColor}08`, border: HW_INNER_BORDER, padding: "8px 9px", minHeight: 0 }}
+            style={{ background: `color-mix(in srgb, ${d.iconColor} 3%, transparent)`, border: HW_INNER_BORDER, padding: "8px 9px", minHeight: 0 }}
           >
             <div className="flex items-center gap-1.5 mb-1">
               <d.Icon size={12} style={{ color: d.iconColor, flexShrink: 0 }} strokeWidth={2} />
@@ -3995,7 +3995,7 @@ function HWComponentCard({
         </div>
       </div>
 
-      <div className="rounded-lg mb-2" style={{ background: `${iconColor}10`, border: HW_INNER_BORDER, padding: "7px 9px" }}>
+      <div className="rounded-lg mb-2" style={{ background: `color-mix(in srgb, ${iconColor} 6%, transparent)`, border: HW_INNER_BORDER, padding: "7px 9px" }}>
         <div className="flex items-center gap-1">
           <span style={{ fontSize: 15, fontWeight: 800, color: "var(--clpa-title)", lineHeight: 1 }}>{primaryValue}</span>
           {primarySample && <SampleTag />}
@@ -4245,7 +4245,7 @@ function HWComponentsSection() {
       ...hwBadgeStatus(gpuStatusBadge),
       rows: [
         { label: "VRAM", value: gpuVram.label, sample: gpuVram.sample },
-        { label: "Driver", value: gpuDriver },
+        { label: "Driver", value: gpuDriver, sample: gpuInfo?.DriverVersion == null },
         { label: "Temp", value: gpuTempC != null ? `${Math.round(gpuTempC)}°C` : "—", sample: gpuTempC == null },
         ...gpus.filter((g) => g !== gpuInfo).map((g) => ({
           label: gpuDisplayName(g) || "GPU",
@@ -4290,7 +4290,7 @@ function HWComponentsSection() {
         // like "Alder Lake-P PCH" would mean hardcoding a lookup table from general knowledge,
         // i.e. fabricating a plausible-sounding string rather than reading a real one. Stays
         // illustrative.
-        { label: "Chipset", value: "—" },
+        { label: "Chipset", value: "—", sample: true },
         { label: "BIOS Date", value: biosDateLabel, sample: biosDate == null },
         // Real, separately-named facts from HWiNFO (see hwinfo.rs) - not a "Motherboard Temp"
         // substitute, and only present at all when this hardware actually exposes them (no
@@ -4306,7 +4306,7 @@ function HWComponentsSection() {
       rows: [
         { label: "IP Address", value: localIp ?? "—", sample: localIp == null },
         ...(wifiSsid ? [{ label: "SSID", value: wifiSsid }] : []),
-        { label: "MAC Address", value: netMac },
+        { label: "MAC Address", value: netMac, sample: netAdapter?.MACAddress == null },
         ...netAdapters.filter((a) => a.Name !== netAdapter?.Name).map((a) => ({
           label: "Also",
           value: a.Name,
@@ -4479,7 +4479,7 @@ function HWDriversCard() {
       </div>
       <div className="grid gap-2" style={{ gridTemplateColumns: "repeat(4, 1fr)" }}>
         {drivers.map((d, i) => (
-          <div key={i} className="rounded-lg flex items-start gap-2" style={{ background: `${d.color}08`, border: HW_INNER_BORDER, padding: "8px 10px" }}>
+          <div key={i} className="rounded-lg flex items-start gap-2" style={{ background: `color-mix(in srgb, ${d.color} 3%, transparent)`, border: HW_INNER_BORDER, padding: "8px 10px" }}>
             <div className="flex items-center justify-center rounded-lg flex-shrink-0" style={{ width: 24, height: 24, background: d.bg }}>
               <d.Icon size={12} style={{ color: d.color }} strokeWidth={2} />
             </div>
