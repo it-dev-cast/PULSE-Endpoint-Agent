@@ -260,7 +260,18 @@ export type MetricPrediction =
   | { status: "insufficient-data"; daysOfHistory: number; minRequired: number }
   | { status: "already-past-threshold"; currentValue: number; daysOfHistory: number }
   | { status: "stable"; currentValue: number; daysOfHistory: number }
-  | { status: "ok"; currentValue: number; daysRemaining: number; risk: "Low" | "Medium" | "High"; daysOfHistory: number };
+  | {
+      status: "ok";
+      currentValue: number;
+      daysRemaining: number;
+      risk: "Low" | "Medium" | "High";
+      daysOfHistory: number;
+      // Real R² over the same regression (ai-service/app.py evaluate_metric) - "high" only when
+      // r2 >= 0.7 AND at least 5 real points exist, "low" otherwise. Only ever present on this
+      // branch: already-past-threshold/stable never fit a regression, so never have a confidence.
+      confidence: "high" | "low";
+      r2: number;
+    };
 
 // Updated by telemetry-server.mjs at most once per real calendar day (matching the snapshot
 // cadence) - null means no real prediction has ever completed yet (not enrolled, backend/

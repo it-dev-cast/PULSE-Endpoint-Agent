@@ -2655,7 +2655,7 @@ function predictionToLifeDisplay(
   prediction: MetricPrediction | null,
   sparkData: number[],
   stableLabel: string,
-): { value: string; unit: string; sub: string; subColor: string; sparkData: number[]; state: LifePredictionState; real: boolean } {
+): { value: string; unit: string; sub: string; subColor: string; sparkData: number[]; state: LifePredictionState; real: boolean; confidence?: "high" | "low" } {
   if (prediction == null) {
     return { value: "—", unit: "", sub: "Unknown", subColor: "var(--clpa-subtle)", sparkData, state: "collecting", real: false };
   }
@@ -2671,7 +2671,7 @@ function predictionToLifeDisplay(
       return { value: "Stable", unit: "", sub: stableLabel, subColor: "var(--clpa-muted)", sparkData, state: "matured", real: true };
     case "ok": {
       const riskColor = prediction.risk === "Low" ? "var(--clpa-muted)" : prediction.risk === "Medium" ? "var(--clpa-warning)" : "var(--clpa-critical)";
-      return { value: String(prediction.daysRemaining), unit: "Days", sub: `Risk: ${prediction.risk}`, subColor: riskColor, sparkData, state: "matured", real: true };
+      return { value: String(prediction.daysRemaining), unit: "Days", sub: `Risk: ${prediction.risk}`, subColor: riskColor, sparkData, state: "matured", real: true, confidence: prediction.confidence };
     }
   }
 }
@@ -2749,6 +2749,7 @@ function AITopPredictionsCard() {
       sub: cpuLoad == null ? "No reading" : cpuLoad >= 90 ? "High" : cpuLoad >= 70 ? "Elevated" : "Normal",
       subColor: cpuLoad == null ? "var(--clpa-subtle)" : cpuLoad >= 90 ? "var(--clpa-critical)" : cpuLoad >= 70 ? "var(--clpa-warning)" : "var(--clpa-success)",
       real: cpuLoad != null,
+      confidence: undefined as "high" | "low" | undefined,
       icon: <Cpu size={14} style={{ color: "var(--clpa-primary)" }} strokeWidth={2} />,
       iconBg: "rgba(var(--clpa-primary-rgb),0.12)",
       data: [] as number[],
@@ -2765,6 +2766,7 @@ function AITopPredictionsCard() {
       sub: thermalRiskReal ? `${Math.round(cpuMinDistanceToTjMaxC!)}°C to throttle` : "No TjMax sensor",
       subColor: "var(--clpa-subtle)",
       real: thermalRiskReal,
+      confidence: undefined as "high" | "low" | undefined,
       icon: <Thermometer size={14} style={{ color: "var(--clpa-warning-bright)" }} strokeWidth={2} />,
       iconBg: "rgba(var(--clpa-warning-bright-rgb),0.12)",
       data: [] as number[],
@@ -2794,20 +2796,36 @@ function AITopPredictionsCard() {
               <div className="flex-1 min-w-0">
                 <div className="flex items-center justify-between gap-2">
                   <span style={{ fontSize: 10, color: "var(--clpa-muted)", fontWeight: 600 }}>{p.label}</span>
-                  <span
-                    style={{
-                      fontSize: 8,
-                      fontWeight: 700,
-                      letterSpacing: 0.3,
-                      color: p.kind === "Forecast" ? "var(--clpa-accent)" : "var(--clpa-primary)",
-                      background: p.kind === "Forecast" ? "rgba(var(--clpa-accent-rgb),0.1)" : "rgba(var(--clpa-primary-rgb),0.1)",
-                      borderRadius: 4,
-                      padding: "1px 6px",
-                      flexShrink: 0,
-                    }}
-                  >
-                    {p.kind}
-                  </span>
+                  <div className="flex items-center gap-1" style={{ flexShrink: 0 }}>
+                    {p.confidence && (
+                      <span
+                        style={{
+                          fontSize: 8,
+                          fontWeight: 700,
+                          letterSpacing: 0.3,
+                          color: p.confidence === "high" ? "var(--clpa-success)" : "var(--clpa-subtle)",
+                          background: p.confidence === "high" ? "rgba(var(--clpa-success-rgb),0.1)" : "rgba(var(--clpa-subtle-rgb),0.1)",
+                          borderRadius: 4,
+                          padding: "1px 6px",
+                        }}
+                      >
+                        {p.confidence === "high" ? "High confidence" : "Low confidence"}
+                      </span>
+                    )}
+                    <span
+                      style={{
+                        fontSize: 8,
+                        fontWeight: 700,
+                        letterSpacing: 0.3,
+                        color: p.kind === "Forecast" ? "var(--clpa-accent)" : "var(--clpa-primary)",
+                        background: p.kind === "Forecast" ? "rgba(var(--clpa-accent-rgb),0.1)" : "rgba(var(--clpa-primary-rgb),0.1)",
+                        borderRadius: 4,
+                        padding: "1px 6px",
+                      }}
+                    >
+                      {p.kind}
+                    </span>
+                  </div>
                 </div>
                 <div className="flex items-baseline gap-1.5 min-w-0" style={{ marginTop: 2 }}>
                   <span style={{ fontSize: 16, fontWeight: 800, color: p.valueColor ?? "var(--clpa-title)", lineHeight: 1, whiteSpace: "nowrap" }}>
