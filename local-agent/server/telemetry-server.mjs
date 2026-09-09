@@ -79,6 +79,15 @@ const MQTT_CA_CERT_PATH = agentConfig.mqttCaCertPath || null;
 const BACKEND_REQUEST_TIMEOUT_MS = 15000;
 // Persisted once per device, reused across restarts rather than re-registering every time -
 // gitignored (see .gitignore) since it holds a real, live API key, not a placeholder.
+//
+// This dev-tree copy registers its OWN device identity, distinct from whatever the installed
+// production agent (C:\Program Files\Pulse Endpoint\local-agent\server\ on a real machine) is
+// using - they are two different real devices with two different real backend rows, never the
+// same one under two paths. Diffing a dev-tree .device-credentials.json/.metric-snapshot-
+// state.json against the installed copy's, or against backend/DB state, produces exactly the
+// kind of "these numbers don't match!" false alarm this comment exists to head off - go check
+// which literal file the process you're actually inspecting has open before assuming any two
+// copies of these filenames refer to the same device.
 const DEVICE_CREDENTIALS_PATH = path.join(__dirname, ".device-credentials.json");
 
 // PRD Section 31 Self-Update v1. AGENT_VERSION is this build's own installed version - baked in
