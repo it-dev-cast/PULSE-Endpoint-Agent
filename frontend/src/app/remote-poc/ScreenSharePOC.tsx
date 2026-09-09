@@ -666,6 +666,11 @@ export default function ScreenSharePOC() {
   // guess about whether the UI merely rendered something.
   const [connectionState, setConnectionState] = useState<RTCPeerConnectionState | "none">("none");
   const [timedOut, setTimedOut] = useState(false);
+  // Real WebRTC fact (RTCPeerConnection.getStats()' selected candidate pair), not a guess - null
+  // until the first successful getStats() poll after "connected". Never fabricated: stays null
+  // (no badge shown) if getStats() ever fails rather than defaulting to either label.
+  const [connectionType, setConnectionType] = useState<"direct" | "relayed" | null>(null);
+  const [sessionDurationSec, setSessionDurationSec] = useState<number | null>(null);
 
   // Real voice/chat/file-transfer state
   const [micEnabled, setMicEnabled] = useState(false);
@@ -706,6 +711,10 @@ export default function ScreenSharePOC() {
   // audit event: set the instant a join is actually approved (not session creation - "duration"
   // means how long an operator was actually connected, not how long this customer sat waiting).
   const operatorJoinedAtRef = useRef<number | null>(null);
+  // Real moment this peer connection first reached "connected" - distinct from
+  // operatorJoinedAtRef (share-side-only, set at approval/offer-creation time): this fires for
+  // BOTH roles, symmetrically, off the one signal that's actually true on both sides.
+  const connectedAtRef = useRef<number | null>(null);
   // Pending file-transfer accept/decline (PRD §30 hardening) - keyed by transfer id so the
   // sender's own sendFileOverChannel call can await the receiver's real response before sending
   // any chunk bytes at all, not just before "completion."
@@ -794,6 +803,28 @@ export default function ScreenSharePOC() {
     }, CONNECT_TIMEOUT_MS);
   }
 
+  // Real WebRTC diagnostic - reads the actual selected candidate pair's candidate types
+  // (RTCIceCandidateStats.candidateType: "relay" means a TURN server actually relayed media;
+  // "host"/"srflx"/"prflx" all mean the two peers found a real direct path). Never fabricated -
+  // a getStats() failure or unresolved pair simply leaves connectionType at whatever it already
+  // was (usually null, so no badge renders) rather than guessing either label.
+  async function detectConnectionType(pc: RTCPeerConnection) {
+    try {
+      const stats = await pc.getStats();
+      let pair: any = null;
+      stats.forEach((report) => {
+        if (report.type === "candidate-pair" && report.state === "succeeded") pair = report;
+      });
+      if (!pair) return;
+      const local = stats.get(pair.localCandidateId);
+      const remote = stats.get(pair.remoteCandidateId);
+      const relayed = local?.candidateType === "relay" || remote?.candidateType === "relay";
+      setConnectionType(relayed ? "relayed" : "direct");
+    } catch {
+      // Leave connectionType as-is - an honest "unknown" (no badge) beats a guessed one.
+    }
+  }
+
   function attachConnectionStateTracking(pc: RTCPeerConnection) {
     pc.onconnectionstatechange = () => {
       setConnectionState(pc.connectionState);
@@ -801,6 +832,12 @@ export default function ScreenSharePOC() {
         window.clearTimeout(connectTimerRef.current);
         connectTimerRef.current = null;
         setTimedOut(false);
+      }
+      if (pc.connectionState === "connected") {
+        if (connectedAtRef.current == null) connectedAtRef.current = Date.now();
+        detectConnectionType(pc);
+      } else if (pc.connectionState === "failed" || pc.connectionState === "closed") {
+        setConnectionType(null);
       }
     };
     // Real accumulation, not replacement - see the top-of-file comment on why overwriting
@@ -924,6 +961,7 @@ export default function ScreenSharePOC() {
       postRealEvent("remote-assist-ended", `Remote assist session ended (operator connected for ${durationLabel}).`, "info");
     }
     operatorJoinedAtRef.current = null;
+    connectedAtRef.current = null;
     pendingFileResponseRef.current.clear();
     dataChannelHandleRef.current = null;
 
@@ -961,6 +999,8 @@ export default function ScreenSharePOC() {
     setViewError(null);
     setConnectionState("none");
     setTimedOut(false);
+    setConnectionType(null);
+    setSessionDurationSec(null);
     setMicEnabled(false);
     setMicError(null);
     setDataChannelOpen(false);
@@ -1351,6 +1391,29 @@ export default function ScreenSharePOC() {
   const shareableLink = sessionId ? `${window.location.origin}${window.location.pathname}?join=${sessionId}` : "";
   const isConnected = connectionState === "connected";
 
+  // Real elapsed time since connectedAtRef was actually set above - ticks only while genuinely
+  // connected; resets to null the instant isConnected goes false; never fabricates a running
+  // clock off a session that never actually connected.
+  useEffect(() => {
+    if (!isConnected) {
+      setSessionDurationSec(null);
+      return;
+    }
+    const tick = () => {
+      const start = connectedAtRef.current;
+      if (start != null) setSessionDurationSec(Math.floor((Date.now() - start) / 1000));
+    };
+    tick();
+    const id = window.setInterval(tick, 1000);
+    return () => window.clearInterval(id);
+  }, [isConnected]);
+
+  function formatDuration(sec: number): string {
+    const m = Math.floor(sec / 60);
+    const s = sec % 60;
+    return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+  }
+
   const MODE_META = {
     screen: { label: "Screen share", Icon: Monitor, desc: "Operator sees this display. Pause anytime." },
     voice: { label: "Voice + chat", Icon: Mic, desc: "Talk and message. No screen is shared." },
@@ -1456,6 +1519,18 @@ export default function ScreenSharePOC() {
             </div>
             {(shareStatus !== "idle" || viewStatus !== "idle") && (
               <CLPABadge label={MODE_META[sessionMode].label} color="var(--clpa-accent-strong)" bg="rgba(var(--clpa-accent-strong-rgb),0.1)" />
+            )}
+            {isConnected && sessionDurationSec != null && (
+              <span style={{ fontSize: 9.5, fontWeight: 700, color: "var(--clpa-subtle)", fontVariantNumeric: "tabular-nums" }}>
+                {formatDuration(sessionDurationSec)}
+              </span>
+            )}
+            {isConnected && connectionType && (
+              <CLPABadge
+                label={connectionType === "direct" ? "Direct P2P" : "Relayed via TURN"}
+                color={connectionType === "direct" ? "var(--clpa-success)" : "var(--clpa-warning)"}
+                bg={connectionType === "direct" ? "rgba(var(--clpa-success-bright-rgb),0.1)" : "rgba(var(--clpa-warning-bright-rgb),0.12)"}
+              />
             )}
           </div>
 
@@ -1639,10 +1714,13 @@ export default function ScreenSharePOC() {
               <CLPACard style={{ padding: "12px 14px" }}>
                 {sessionMode === "screen" ? (
                   <div style={{ position: "relative", marginBottom: 12 }}>
-                    <video ref={localVideoRef} autoPlay muted playsInline style={{ width: "100%", borderRadius: 10, background: "var(--clpa-title)", maxHeight: 300, objectFit: "contain", opacity: videoPaused ? 0.15 : 1, display: "block" }} />
+                    <video ref={localVideoRef} autoPlay muted playsInline style={{ width: "100%", borderRadius: 10, background: "var(--clpa-title)", maxHeight: 300, objectFit: "contain", filter: videoPaused ? "blur(16px)" : "none", opacity: videoPaused ? 0.5 : 1, display: "block", transition: "filter 0.2s, opacity 0.2s" }} />
                     {videoPaused && (
-                      <div className="flex items-center gap-1.5" style={{ position: "absolute", inset: 0, alignItems: "center", justifyContent: "center", fontSize: 11, fontWeight: 700, color: "#FFFFFF" }}>
-                        <Pause size={13} strokeWidth={2.4} /> Screen sharing paused
+                      <div className="flex flex-col items-center justify-center gap-2" style={{ position: "absolute", inset: 0 }}>
+                        <div className="flex items-center justify-center rounded-full" style={{ width: 40, height: 40, background: "rgba(15,23,42,0.72)", border: "1px solid rgba(255,255,255,0.2)" }}>
+                          <Pause size={16} color="#FFFFFF" strokeWidth={2.4} />
+                        </div>
+                        <span style={{ fontSize: 11, fontWeight: 700, color: "#FFFFFF" }}>Screen sharing paused</span>
                       </div>
                     )}
                     <button
