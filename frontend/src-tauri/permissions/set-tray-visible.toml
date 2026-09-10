@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "allow-set-tray-visible"
+description = "Show or hide the system tray icon per Settings' real Show in Tray toggle"
+commands.allow = ["set_tray_visible"]

@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "allow-end-remote-session"
+description = "Tell the backend a remote assist session has ended immediately, bypassing the grace period"
+commands.allow = ["end_remote_session"]

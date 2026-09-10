@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "allow-request-remote-assist-attention"
+description = "Focus or flash this app's window when a real remote assist join-request arrives"
+commands.allow = ["request_remote_assist_attention"]

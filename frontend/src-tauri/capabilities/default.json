@@ -11,6 +11,13 @@
     "core:window:allow-toggle-maximize",
     "core:window:allow-close",
     "core:window:allow-start-dragging",
-    "allow-create-remote-session"
+    "allow-create-remote-session",
+    "allow-log-remote-assist-event",
+    "allow-get-turn-credentials",
+    "allow-end-remote-session",
+    "allow-request-remote-assist-attention",
+    "allow-update-connection-status",
+    "allow-update-unread-count",
+    "allow-set-tray-visible"
   ]
 }

@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "allow-update-connection-status"
+description = "Sync the system tray's Connection status line with this app's real telemetry-connection state"
+commands.allow = ["update_connection_status"]

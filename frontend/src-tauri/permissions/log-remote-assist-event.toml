@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "allow-log-remote-assist-event"
+description = "Log a real Remote Assist audit-trail event (join request/approved/denied, session ended, file transferred) to the local telemetry server"
+commands.allow = ["log_remote_assist_event"]

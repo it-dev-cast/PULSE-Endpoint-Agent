@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "allow-update-unread-count"
+description = "Sync the system tray's unread badge count with this app's real unread alert count"
+commands.allow = ["update_unread_count"]
