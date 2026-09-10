@@ -30,6 +30,9 @@ release-signing-key.json
 command-center.exe
 pulse-telemetry.exe
 telemetry-server.exe
+# Third-party bundled binary (GPLv2, see PulseEndpoint.iss's own comment) - unlike this project's
+# own *.exe above, this is never rebuilt from source here, so it has to actually be tracked.
+!local-agent/rust-collector/smartmontools/smartctl.exe
 installer/output/
 installer/redist/
 backend/releases/

@@ -85,6 +85,19 @@ Source: "..\frontend\src-tauri\target\release\bundle\nsis\Pulse Endpoint agent_{
 Source: "..\local-agent\server\telemetry-server.exe"; DestDir: "{app}\local-agent\server"; Flags: ignoreversion; Components: agentcore
 Source: "..\local-agent\server\get-telemetry.ps1"; DestDir: "{app}\local-agent\server"; Flags: ignoreversion; Components: agentcore
 Source: "..\local-agent\rust-collector\target\release\pulse-telemetry.exe"; DestDir: "{app}\local-agent\rust-collector\target\release"; Flags: ignoreversion; Components: agentcore
+
+; --- smartmontools (GPLv2, confirmed via its own COPYING.txt - bundled unmodified and invoked
+;     as a separate subprocess by pulse-telemetry.exe, not linked into it, so this stays "mere
+;     aggregation" under GPLv2 and doesn't affect this project's own license). Only smartctl.exe
+;     itself plus its drive database and license text are shipped - smartd.exe/its .conf/helpers
+;     are the background-daemon half of smartmontools this project never runs, so they're left
+;     out. Placed as a private sibling of rust-collector's own binary (not on PATH - see
+;     find_smartctl()'s bundled-path-first lookup), so this never collides with a machine's own
+;     separately-installed smartmontools copy.
+Source: "..\local-agent\rust-collector\smartmontools\smartctl.exe"; DestDir: "{app}\local-agent\rust-collector\smartmontools"; Flags: ignoreversion; Components: agentcore
+Source: "..\local-agent\rust-collector\smartmontools\drivedb.h"; DestDir: "{app}\local-agent\rust-collector\smartmontools"; Flags: ignoreversion; Components: agentcore
+Source: "..\local-agent\rust-collector\smartmontools\COPYING.txt"; DestDir: "{app}\local-agent\rust-collector\smartmontools"; Flags: ignoreversion; Components: agentcore
+
 Source: "..\local-agent\scripts\run-hidden.vbs"; DestDir: "{app}\local-agent\scripts"; Flags: ignoreversion; Components: agentcore
 Source: "..\local-agent\scripts\watchdog.ps1"; DestDir: "{app}\local-agent\scripts"; Flags: ignoreversion; Components: agentcore
 Source: "..\local-agent\scripts\start-watchdog.cmd"; DestDir: "{app}\local-agent\scripts"; Flags: ignoreversion; Components: agentcore

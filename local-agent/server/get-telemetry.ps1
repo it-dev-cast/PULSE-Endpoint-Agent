@@ -20,6 +20,23 @@ $os = Get-CimInstance Win32_OperatingSystem |
 $disks = Get-CimInstance Win32_DiskDrive |
     Select-Object Model, SerialNumber, Size, InterfaceType, MediaType, Index, DeviceID
 
+# Real, observed sentinel: some NVMe controllers' legacy ATA-translation layer returns an
+# all-F placeholder (e.g. "FFFF-FFFF-FFFF-FFFF-FFFF-FFFF") through Win32_DiskDrive.SerialNumber
+# instead of the drive's real NVMe serial - a genuine driver/WMI-surface limitation, not a query
+# failure (the call itself succeeds and returns a value, just not a usable one). Flagged here so
+# the dashboard can show "why" instead of just a dash or a meaningless placeholder string.
+foreach ($d in $disks) {
+    $sn = if ($d.SerialNumber) { $d.SerialNumber.Trim() } else { $null }
+    $reason = if ([string]::IsNullOrEmpty($sn)) {
+        @{ code = "no-data-returned"; message = "Win32_DiskDrive returned no serial number for this drive." }
+    } elseif ($sn -match '^[F0]+$' -or $sn -match '^-*$') {
+        @{ code = "sentinel-value"; message = "This drive's controller returned a placeholder serial ($sn) through Windows' legacy ATA-translation WMI surface, not its real NVMe serial - a known driver/OEM limitation, not a query failure." }
+    } else {
+        $null
+    }
+    Add-Member -InputObject $d -MemberType NoteProperty -Name "SerialNumberReason" -Value $reason -Force
+}
+
 $battery = Get-CimInstance Win32_Battery |
     Select-Object Name, EstimatedChargeRemaining, BatteryStatus, DesignCapacity, FullChargeCapacity
 
@@ -246,40 +263,63 @@ try {
 # queries need an elevated handle on Windows). \\.\PhysicalDriveN is NOT what smartctl expects
 # here: it wants a /dev/sdX-style path plus a -d type, and that mapping is drive/OEM-specific,
 # so it's discovered via --scan rather than assumed.
-$smartctlPath = Get-Command smartctl.exe -ErrorAction SilentlyContinue
+#
+# Bundled copy checked first (same private sibling location as rust-collector's own lookup - see
+# main.rs's find_smartctl and PulseEndpoint.iss) so this independent PS-side query finds the
+# shipped binary too, not just a machine's own separately-installed copy on PATH.
+$bundledSmartctl = Join-Path $PSScriptRoot "..\rust-collector\smartmontools\smartctl.exe"
+$smartctlPath = if (Test-Path $bundledSmartctl) {
+    Get-Item $bundledSmartctl
+} else {
+    Get-Command smartctl.exe -ErrorAction SilentlyContinue
+}
 [Console]::Error.WriteLine("[diag] smartctlPath: $(if ($smartctlPath) { $smartctlPath.Source } else { 'NOT FOUND' })")
 $storageHealth = $null
-if ($smartctlPath) {
+$storageHealthReason = $null
+if (-not $smartctlPath) {
+    $storageHealthReason = @{ code = "tool-not-found"; message = "smartctl.exe NOT FOUND - genuinely NOT INSTALLED, distinct from a query failure. Install smartmontools for real storage health data." }
+} else {
+    $smartctlExe = $smartctlPath.Source
     try {
-        $scanText = & smartctl.exe --scan -j 2>&1 | Out-String
+        $scanText = & $smartctlExe --scan -j 2>&1 | Out-String
         $scanResult = $scanText | ConvertFrom-Json
         $firstDevice = $scanResult.devices | Select-Object -First 1
 
         if (-not $firstDevice) {
             [Console]::Error.WriteLine("[diag] smartctl --scan found no devices")
+            $storageHealthReason = @{ code = "hardware-unsupported"; message = "smartctl --scan found no devices - genuinely NO SMART-CAPABLE DRIVE DETECTED, not a query failure." }
         } else {
             [Console]::Error.WriteLine("[diag] smartctl --scan found device: $($firstDevice.name) (type: $($firstDevice.type))")
 
-            $smartText = & smartctl.exe -a -j -d $firstDevice.type $firstDevice.name 2>&1 | Out-String
+            $smartText = & $smartctlExe -a -j -d $firstDevice.type $firstDevice.name 2>&1 | Out-String
 
             # Non-admin NVMe access on Windows doesn't always fail with a clean "Access is
             # denied" — smartmontools' Windows port has been observed surfacing it as things
             # like "Invalid argument" or "Input/output error" instead, so match broadly.
-            if ($smartText -match 'Invalid argument|Permission denied|Access is denied|Input/output error') {
+            $elevationLike = $smartText -match 'Invalid argument|Permission denied|Access is denied|Input/output error'
+            if ($elevationLike) {
                 [Console]::Error.WriteLine("[telemetry] smartctl requires elevated PowerShell - run this server as Administrator for real storage health data.")
             }
 
             try {
                 $storageHealth = $smartText | ConvertFrom-Json
                 [Console]::Error.WriteLine("[diag] smartctl query result: parsed OK")
+                if ($elevationLike) {
+                    $storageHealthReason = @{ code = "elevation-required"; message = "smartctl requires elevated PowerShell - run this server as Administrator for real storage health data." }
+                }
             } catch {
                 [Console]::Error.WriteLine("[diag] smartctl query output was not valid JSON (likely the issue reported above)")
                 $storageHealth = $null
+                $storageHealthReason = @{
+                    code    = if ($elevationLike) { "elevation-required" } else { "no-data-returned" }
+                    message = if ($elevationLike) { "smartctl requires elevated PowerShell - run this server as Administrator for real storage health data." } else { "smartctl query output was not valid JSON." }
+                }
             }
         }
     } catch {
         [Console]::Error.WriteLine("[diag] smartctl --scan threw: $($_.Exception.Message)")
         $storageHealth = $null
+        $storageHealthReason = @{ code = "no-data-returned"; message = "smartctl --scan threw: $($_.Exception.Message)" }
     }
 }
 
@@ -431,6 +471,7 @@ $result = [ordered]@{
         portable   = $batteryPortable
     }
     storageHealth = $storageHealth
+    storageHealthReason = $storageHealthReason
     gpuUtilization = $gpuUtil
     wifi          = $wifiInfo
     logicalDisks  = @($logicalDisks)

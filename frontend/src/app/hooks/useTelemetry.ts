@@ -1,6 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { loadJSON, saveJSON } from "../lib/storage";
 
+// Sensor self-diagnostic system - a real, human-readable reason a sibling field is null (tool
+// not found, needs elevation, a placeholder sentinel, a discarded implausible reading, or this
+// hardware genuinely doesn't expose the sensor), plus a stable code the UI keys off of to decide
+// dash-with-info-icon vs. fully hidden (see isActionable-style checks at each call site).
+export type SensorReason = { code: string; message: string };
+
 export type CpuTelemetry = {
   Manufacturer: string;
   Name: string;
@@ -30,6 +36,7 @@ export type StorageDevice = {
   Size: number;
   InterfaceType: string;
   MediaType: string;
+  SerialNumberReason?: SensorReason | null;
 };
 
 export type BatteryTelemetry = {
@@ -299,6 +306,10 @@ export type TelemetrySnapshot = {
   tpm: TpmTelemetry;
   batteryDetail: BatteryDetail;
   storageHealth: StorageHealth;
+  storageHealthReason?: SensorReason | null;
+  fanRpmReason?: SensorReason | null;
+  batteryCycleCountReason?: SensorReason | null;
+  batteryTemperatureCReason?: SensorReason | null;
   gpuUtilization: number | null;
   wifi: WifiInfo;
   logicalDisks: LogicalDisk[];

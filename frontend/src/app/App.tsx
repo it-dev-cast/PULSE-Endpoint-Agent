@@ -1039,6 +1039,10 @@ function BatteryCard() {
   // are both present but contain only the standard empty-namespace system classes - no Dell
   // instrumentation provider is installed on this machine to populate them.
   const batteryTempC = connected && data?.hardwareMonitor?.batteryTemperatureC != null ? data.hardwareMonitor.batteryTemperatureC : null;
+  // Sensor self-diagnostic system: now surfaced (dash + real reason) instead of the whole "Temp"
+  // column disappearing whenever it's null - the comment above already establishes this is a
+  // genuine per-hardware fact, not a bug, so showing why is more honest than hiding it entirely.
+  const batteryTempReason = connected ? data?.batteryTemperatureCReason ?? null : null;
 
   // Real only when charge % itself is real (same condition as `pct` above).
   const chargeReal = chargePct != null;
@@ -1121,6 +1125,7 @@ function BatteryCard() {
             <div className="flex items-center gap-1">
               <span style={{ fontSize: 9.5, color: "var(--clpa-subtle)", fontWeight: 600 }}>{cycleLabel}</span>
               {cycleCount == null && <SampleTag />}
+              {cycleCount == null && connected && data?.batteryCycleCountReason && <AIInfo text={data.batteryCycleCountReason.message} />}
             </div>
           </div>
           <div className="flex items-center gap-1" style={{ marginBottom: 8 }}>
@@ -1152,7 +1157,7 @@ function BatteryCard() {
         </div>
       </div>
 
-      <div className={`grid ${batteryTempC != null ? "grid-cols-3" : "grid-cols-2"}`} style={{ borderTop: "1px solid var(--clpa-divider)", paddingTop: 9 }}>
+      <div className="grid grid-cols-3" style={{ borderTop: "1px solid var(--clpa-divider)", paddingTop: 9 }}>
         <div>
           <div style={{ fontSize: 9, color: "var(--clpa-subtle)" }}>Status</div>
           <div className="flex items-center gap-1">
@@ -1176,14 +1181,15 @@ function BatteryCard() {
             {healthLabel}
           </span>
         </div>
-        {batteryTempC != null && (
-          <div>
-            <div style={{ fontSize: 9, color: "var(--clpa-subtle)" }}>Temp</div>
-            <div className="flex items-center gap-1">
-              <span style={{ fontSize: 11, color: "var(--clpa-title)", fontWeight: 700 }}>{Math.round(batteryTempC)}°C</span>
-            </div>
+        <div>
+          <div style={{ fontSize: 9, color: "var(--clpa-subtle)" }}>Temp</div>
+          <div className="flex items-center gap-1">
+            <span style={{ fontSize: 11, color: "var(--clpa-title)", fontWeight: 700 }}>
+              {batteryTempC != null ? `${Math.round(batteryTempC)}°C` : "—"}
+            </span>
+            {batteryTempC == null && batteryTempReason && <AIInfo text={batteryTempReason.message} />}
           </div>
-        )}
+        </div>
       </div>
       {batteries.length > 1 && (
         <div className="flex flex-col gap-1" style={{ borderTop: "1px solid var(--clpa-divider)", paddingTop: 8, marginTop: 8 }}>
@@ -1480,8 +1486,9 @@ function StorageCard() {
                 <span style={{ fontSize: 9, color: "var(--clpa-subtle)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                   {model}{sizeGb != null ? ` · ${Math.round(sizeGb)} GB` : ""}
                 </span>
-                <span style={{ fontSize: 9, fontWeight: 600, color: "var(--clpa-body)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 150 }}>
-                  {serial}
+                <span className="flex items-center" style={{ fontSize: 9, fontWeight: 600, color: "var(--clpa-body)", maxWidth: 150 }}>
+                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{serial}</span>
+                  {drive.SerialNumberReason && <AIInfo text={drive.SerialNumberReason.message} />}
                 </span>
               </div>
             );
@@ -1503,6 +1510,12 @@ function ThermalCard() {
   // rather than shown as a dead placeholder when that's the case - never invented, and never
   // hidden on hardware that genuinely does report one.
   const fanRpm = connected ? data?.hardwareMonitor?.fanRpm ?? null : null;
+  // Sensor self-diagnostic system: only an actionable reason (a tool that isn't running yet, not
+  // this hardware's own genuine tachometer-less ceiling) gets a visible dash + info icon among the
+  // temp rows below - the fan widget itself stays fully hidden either way, since there's no
+  // dash-shaped version of a spinning-fan graphic worth inventing for this.
+  const fanReason = connected ? data?.fanRpmReason ?? null : null;
+  const fanReasonActionable = fanRpm == null && fanReason != null && fanReason.code !== "hardware-unsupported";
 
   // Real Normal/Warning/Critical from the worst real reading across CPU/GPU/SSD/Motherboard,
   // against useAlertEngine's own live cpu-temp thresholds (reused here since there's no separate
@@ -1532,9 +1545,22 @@ function ThermalCard() {
       <div className="flex items-center gap-1 flex-shrink-0" style={{ minWidth: 32, justifyContent: "flex-end" }}>
         <span style={{ textAlign: "right", fontSize: 9.5, fontWeight: 600, color: "var(--clpa-body)" }}>{t.value}</span>
         {t.sample && <SampleTag />}
+        {t.reason && <AIInfo text={t.reason.message} />}
       </div>
     </div>
   ));
+  if (fanReasonActionable) {
+    tempRows.push(
+      <div key="fan-reason" className="flex items-center gap-2">
+        <span style={{ width: 68, fontSize: 9.5, color: "var(--clpa-muted)" }}>Fan RPM</span>
+        <div style={{ flex: 1, height: 6, borderRadius: 999, background: "var(--clpa-surface-border)" }} />
+        <div className="flex items-center gap-1 flex-shrink-0" style={{ minWidth: 32, justifyContent: "flex-end" }}>
+          <span style={{ textAlign: "right", fontSize: 9.5, fontWeight: 600, color: "var(--clpa-body)" }}>—</span>
+          <AIInfo text={fanReason!.message} />
+        </div>
+      </div>,
+    );
+  }
 
   return (
     <>

@@ -3197,6 +3197,14 @@ function putDetail(detail, key, value) {
   detail[key] = value;
 }
 
+// Sensor self-diagnostic system: a reason is only ever meaningful sitting next to a null value
+// (a real value needs no explanation), so this is deliberately the mirror image of putDetail -
+// sent only when there IS a reason, not gated on the value being present.
+function putReason(detail, key, reason) {
+  if (reason === null || reason === undefined) return;
+  detail[key] = reason;
+}
+
 function batteryHealthFromTelemetry(data) {
   const designedCapacity = data?.batteryDetail?.static?.DesignedCapacity;
   const fullChargedCapacity = data?.batteryDetail?.fullCharge?.FullChargedCapacity;
@@ -3289,13 +3297,16 @@ function extractLiveStatusFields(data) {
   // batteryCycleCount reflects only rust's own corroborated reading (see the merge logic in
   // collect() that overwrites ps.batteryDetail.cycle.CycleCount from rust's verdict, not
   // root/wmi's raw BatteryCycleCount) - null here means genuinely unsupported/unverifiable on
-  // this hardware, not a real zero. batteryTemperatureC is deliberately NOT sent at all: confirmed
-  // absent on this real machine via two independent sources (LibreHardwareMonitor's own sensor
-  // enumeration and rust's separate Windows Battery API read) - a genuine hardware ceiling, same
-  // category as this project's known fan-RPM gap, not worth wiring a field that can never be real
-  // here (though another device's EC might expose it - revisit if that's ever confirmed live).
+  // this hardware, not a real zero (see batteryCycleCountReason for which). batteryTemperatureC:
+  // now surfaced honestly (previously withheld here even though rust already collects a real
+  // per-poll None/Some) - absent on this dev machine's own EC, but another device's EC might
+  // expose it, so it's sent with a reason instead of silently omitted for every machine.
   putDetail(detail, "batteryCycleCount", numOrNull(data?.batteryDetail?.cycle?.CycleCount));
+  putReason(detail, "batteryCycleCountReason", data?.batteryCycleCountReason);
+  putDetail(detail, "batteryTemperatureC", numOrNull(data?.hardwareMonitor?.batteryTemperatureC));
+  putReason(detail, "batteryTemperatureCReason", data?.batteryTemperatureCReason);
   putDetail(detail, "storageWearPct", numOrNull(data?.storageHealth?.nvme_smart_health_information_log?.percentage_used));
+  putReason(detail, "storageWearPctReason", data?.storageHealthReason);
   // Real NVMe media-error/critical-warning signals - already sitting in data.storageHealth (the
   // full smartctl JSON get-telemetry.ps1 already collects for storageWearPct above), just not
   // previously read. NVMe has no ATA-style attribute table (no Reallocated_Sector_Ct/
@@ -3309,7 +3320,9 @@ function extractLiveStatusFields(data) {
   // into human-readable status text (same "send the raw source fact, not a derived value"
   // convention as biosFirmwareUpdateAvailable above).
   putDetail(detail, "storageMediaErrors", numOrNull(data?.storageHealth?.nvme_smart_health_information_log?.media_errors));
+  putReason(detail, "storageMediaErrorsReason", data?.storageHealthReason);
   putDetail(detail, "storageCriticalWarning", numOrNull(data?.storageHealth?.nvme_smart_health_information_log?.critical_warning));
+  putReason(detail, "storageCriticalWarningReason", data?.storageHealthReason);
   const driveModels = (Array.isArray(data?.storage) ? data.storage : []).map((d) => strOrNull(d?.Model)).filter(Boolean);
   putDetail(detail, "driveModel", driveModels.length > 0 ? driveModels.join(" · ") : null);
   if (typeof totalKB === "number" && totalKB > 0) {
@@ -4241,6 +4254,14 @@ function mergeRustData(ps, rust) {
         batteryTemperatureC: ps.hardwareMonitor?.batteryTemperatureC ?? rb.temperatureC,
       };
     }
+    if ((ps.hardwareMonitor?.batteryTemperatureC ?? rb.temperatureC) == null) {
+      ps.batteryTemperatureCReason = {
+        code: "hardware-unsupported",
+        message: "This battery/EC doesn't report temperature to either LibreHardwareMonitor or rust's own Windows Battery API read.",
+      };
+    } else {
+      ps.batteryTemperatureCReason = null;
+    }
 
     // batteryDetail.cycle.CycleCount deliberately does NOT follow the "rust when present, else
     // PS" pattern above - it always takes rust's own verdict (present or null), overwriting
@@ -4253,6 +4274,18 @@ function mergeRustData(ps, rust) {
     // corroboration gap is the real signal: root/wmi's "0" here is very likely an unpopulated-
     // firmware default, not a true reading, so this only ever surfaces a cycle count when rust's
     // own reading corroborates the concept is actually supported on this hardware.
+    if (rb.cycleCount == null) {
+      const wmiRaw = ps.batteryDetail?.cycle?.CycleCount;
+      ps.batteryCycleCountReason =
+        wmiRaw != null
+          ? {
+              code: "implausible-reading-discarded",
+              message: `Windows reported ${wmiRaw} cycles via WMI, but rust's own independent battery read (a different API) returned nothing - WMI's number isn't trusted alone here (see this project's own cross-validation), so this shows unavailable rather than a possibly-fake reading.`,
+            }
+          : { code: "hardware-unsupported", message: "This battery/EC doesn't report a cycle count to either Windows API this project reads." };
+    } else {
+      ps.batteryCycleCountReason = null;
+    }
     ps.batteryDetail.cycle = { ...(ps.batteryDetail.cycle ?? {}), CycleCount: rb.cycleCount };
   }
 
@@ -4288,6 +4321,17 @@ function mergeRustData(ps, rust) {
     if (rh.temperatureC != null) {
       ps.storageHealth.temperature = { ...(ps.storageHealth.temperature ?? {}), current: rh.temperatureC };
     }
+  }
+
+  // Same "Rust is authoritative when it ran" priority as storageHealth's own values above -
+  // rust's own reason (from the exact same bundled-smartctl attempt) wins over PS's independent
+  // one when rust actually attempted the collection. rust.storageHealth present means rust
+  // succeeded, so any reason is stale/inapplicable and explicitly cleared rather than left
+  // dangling from a previous failed cycle.
+  if (rust.storageHealth) {
+    ps.storageHealthReason = null;
+  } else if (rust.storageHealthReason) {
+    ps.storageHealthReason = rust.storageHealthReason;
   }
 
   return ps;
@@ -4431,6 +4475,24 @@ async function collect() {
       parsed.hardwareMonitor.fanRpm = wmiFanRpm;
     } else if (wmiFanRpm != null && !parsed.hardwareMonitor) {
       parsed.hardwareMonitor = mergeHwInfoIntoHardwareMonitor(null, { fanRpm: wmiFanRpm });
+    }
+    // Three independent sources tried above, all with their own real "why not" already known at
+    // this point - combined into one honest reason only when all three genuinely came up empty,
+    // rather than picking just one and hiding the other two attempts.
+    if (!parsed.hardwareMonitor?.fanRpm) {
+      const lhmPart = hardwareMonitor == null ? "LibreHardwareMonitor: not reachable" : "LibreHardwareMonitor: no fan sensor exposed";
+      const hwinfoPart = rustData?.hwinfo == null ? "HWiNFO: not available" : "HWiNFO: no fan sensor exposed";
+      const wmiPart = wmiFanRpm == null ? "WMI Win32_Fan: empty" : null;
+      const parts = [lhmPart, hwinfoPart, wmiPart].filter(Boolean);
+      putReason(parsed, "fanRpmReason", {
+        code: hardwareMonitor == null && rustData?.hwinfo == null ? "tool-not-found" : "hardware-unsupported",
+        // Plain ASCII join ("; ", matching error_messages.join in main.rs) rather than a middle
+        // dot - confirmed live that this exact non-ASCII character gets mangled somewhere in the
+        // Node SEA build pipeline (correct UTF-8 in source, correct output from a plain `node`
+        // run, corrupted only in the compiled telemetry-server.exe) - not worth chasing that
+        // pipeline bug when this project's own convention for joining a list is already ASCII.
+        message: parts.join("; ") + " - null on hardware none of these expose a tachometer for.",
+      });
     }
     // HWiNFO-only facts with no LibreHardwareMonitor equivalent and no PS-side counterpart to
     // preserve - a genuinely new top-level field, not merged into hardwareMonitor's LHM-shaped

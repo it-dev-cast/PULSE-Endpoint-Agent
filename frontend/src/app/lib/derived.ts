@@ -369,15 +369,31 @@ export function thermalSeverityColor(tempC: number | null, warning: number, crit
   return "var(--clpa-emerald)";
 }
 
-export type ThermalRow = { label: string; value: string; pct: number; color: string; sample: boolean };
+export type ThermalRow = {
+  label: string;
+  value: string;
+  pct: number;
+  color: string;
+  sample: boolean;
+  // Sensor self-diagnostic system - a real reason this row is a dash (tool missing, needs
+  // elevation, hardware doesn't expose it), shown as a hoverable info icon next to it.
+  reason?: { code: string; message: string } | null;
+};
 
-function thermalTempRow(label: string, tempC: number | null, warning: number, critical: number): ThermalRow {
+function thermalTempRow(
+  label: string,
+  tempC: number | null,
+  warning: number,
+  critical: number,
+  reason?: { code: string; message: string } | null,
+): ThermalRow {
   return {
     label,
     value: tempC != null ? `${Math.round(tempC)}°C` : "—",
     pct: tempC != null ? Math.max(0, Math.min(100, Math.round(tempC))) : 0,
     color: thermalSeverityColor(tempC, warning, critical),
     sample: false,
+    reason: tempC == null ? reason ?? null : null,
   };
 }
 
@@ -420,7 +436,7 @@ export function getThermalRows(data: Snapshot, connected: boolean, cpuWarning: n
     return [
       thermalTempRow("CPU Temp", cpuTempC, cpuWarning, cpuCritical),
       thermalTempRow("GPU Temp", gpuTempC, GPU_TEMP_WARNING_C, GPU_TEMP_CRITICAL_C),
-      thermalTempRow("SSD Temp", ssdTempC, ssd.warning, ssd.critical),
+      thermalTempRow("SSD Temp", ssdTempC, ssd.warning, ssd.critical, data?.storageHealthReason),
       moboTempC != null
         ? thermalTempRow("Motherboard", moboTempC, DIMM_TEMP_WARNING_C, DIMM_TEMP_CRITICAL_C)
         : thermalTempRow(dimmTempC != null ? "DIMM Temp" : "Motherboard", dimmTempC, DIMM_TEMP_WARNING_C, DIMM_TEMP_CRITICAL_C),

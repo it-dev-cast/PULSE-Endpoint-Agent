@@ -655,32 +655,57 @@ fn run_collect() {
     // logged (parity with the PS side's `[diag] smartctlPath: ...` line) and the exact same
     // resolved binary is used for both the scan and the health query below, not just "whatever
     // Command happens to find" twice independently.
+    //
+    // Bundled copy checked first (see PulseEndpoint.iss - shipped as a private sibling of this
+    // binary at rust-collector/smartmontools/, not installed onto system PATH) - GPLv2, verified
+    // this exact binary runs standalone (no companion DLLs) before bundling it. Checked before
+    // PATH so the version this project actually tested and shipped always wins over an unrelated
+    // smartctl a machine might separately have installed (this dev machine is exactly such a
+    // case). Falls back to PATH so a machine without the bundle yet (or a dev build run before
+    // the installer's layout exists on disk) keeps today's behavior instead of regressing.
     fn find_smartctl() -> Option<std::path::PathBuf> {
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(dir) = exe.parent() {
+                let bundled = dir.join("..").join("..").join("smartmontools").join("smartctl.exe");
+                if bundled.is_file() {
+                    return Some(bundled);
+                }
+            }
+        }
         let path_var = std::env::var_os("PATH")?;
         std::env::split_paths(&path_var)
             .map(|dir| dir.join("smartctl.exe"))
             .find(|candidate| candidate.is_file())
     }
 
-    let storage_health: Option<serde_json::Value> = (|| {
+    // Reason surfaced alongside a null field (PRD: sensor self-diagnostic system) - a stable code
+    // for the frontend to key off of, plus the same human message this closure already eprintln!s
+    // at every branch below, just also kept instead of only printed. Taxonomy shared across every
+    // scoped sensor in this diagnostic system (see the fan/battery reasons further down too), not
+    // invented fresh per-field.
+    fn reason(code: &str, message: String) -> serde_json::Value {
+        json!({ "code": code, "message": message })
+    }
+
+    let (storage_health, storage_health_reason): (Option<serde_json::Value>, Option<serde_json::Value>) = (|| {
         let smartctl_path = match find_smartctl() {
             Some(p) => {
                 eprintln!("[pulse-telemetry] storageHealth: smartctl.exe found at {}", p.display());
                 p
             }
             None => {
-                eprintln!(
-                    "[pulse-telemetry] storageHealth: smartctl.exe NOT FOUND on PATH - genuinely NOT INSTALLED, distinct from a query failure. Install smartmontools for real storage health data."
-                );
-                return None;
+                let msg = "smartctl.exe NOT FOUND - genuinely NOT INSTALLED, distinct from a query failure. Install smartmontools for real storage health data.".to_string();
+                eprintln!("[pulse-telemetry] storageHealth: {msg}");
+                return (None, Some(reason("tool-not-found", msg)));
             }
         };
 
         let scan_output = match Command::new(&smartctl_path).args(["--scan", "-j"]).output() {
             Ok(o) => o,
             Err(e) => {
-                eprintln!("[pulse-telemetry] storageHealth: failed to run smartctl --scan: {e}");
-                return None;
+                let msg = format!("failed to run smartctl --scan: {e}");
+                eprintln!("[pulse-telemetry] storageHealth: {msg}");
+                return (None, Some(reason("no-data-returned", msg)));
             }
         };
 
@@ -691,19 +716,21 @@ fn run_collect() {
         let scan_result: ScanResult = match serde_json::from_slice(&scan_output.stdout) {
             Ok(r) => r,
             Err(e) => {
-                eprintln!(
-                    "[pulse-telemetry] storageHealth: smartctl --scan produced unparseable JSON: {e} - raw stdout: {}",
+                let msg = format!(
+                    "smartctl --scan produced unparseable JSON: {e} - raw stdout: {}",
                     String::from_utf8_lossy(&scan_output.stdout)
                 );
-                return None;
+                eprintln!("[pulse-telemetry] storageHealth: {msg}");
+                return (None, Some(reason("no-data-returned", msg)));
             }
         };
 
         let device = match scan_result.devices.first() {
             Some(d) => d,
             None => {
-                eprintln!("[pulse-telemetry] storageHealth: smartctl --scan found no devices - genuinely NO SMART-CAPABLE DRIVE DETECTED, not a query failure.");
-                return None;
+                let msg = "smartctl --scan found no devices - genuinely NO SMART-CAPABLE DRIVE DETECTED, not a query failure.".to_string();
+                eprintln!("[pulse-telemetry] storageHealth: {msg}");
+                return (None, Some(reason("hardware-unsupported", msg)));
             }
         };
         eprintln!("[pulse-telemetry] storageHealth: smartctl --scan found device: {} (type: {})", device.name, device.device_type);
@@ -714,19 +741,21 @@ fn run_collect() {
         {
             Ok(o) => o,
             Err(e) => {
-                eprintln!("[pulse-telemetry] storageHealth: failed to run smartctl -a: {e}");
-                return None;
+                let msg = format!("failed to run smartctl -a: {e}");
+                eprintln!("[pulse-telemetry] storageHealth: {msg}");
+                return (None, Some(reason("no-data-returned", msg)));
             }
         };
 
         let report: serde_json::Value = match serde_json::from_slice(&health_output.stdout) {
             Ok(v) => v,
             Err(e) => {
-                eprintln!(
-                    "[pulse-telemetry] storageHealth: smartctl -a produced unparseable JSON: {e} - raw stdout: {}",
+                let msg = format!(
+                    "smartctl -a produced unparseable JSON: {e} - raw stdout: {}",
                     String::from_utf8_lossy(&health_output.stdout)
                 );
-                return None;
+                eprintln!("[pulse-telemetry] storageHealth: {msg}");
+                return (None, Some(reason("no-data-returned", msg)));
             }
         };
 
@@ -753,20 +782,34 @@ fn run_collect() {
         let power_on_hours = report.pointer("/nvme_smart_health_information_log/power_on_hours").and_then(|v| v.as_i64());
 
         if percentage_used.is_none() && temperature_c.is_none() && power_on_hours.is_none() {
-            eprintln!(
-                "[pulse-telemetry] storageHealth: query ran but none of percentage_used/temperature/power_on_hours were present - likely a non-NVMe drive (this parses the NVMe SMART log shape specifically, matching what get-telemetry.ps1/the frontend already read) or the query genuinely failed (see any error message above)."
-            );
-            return None;
+            // Same broad OS-error text match get-telemetry.ps1's PS-side smartctl call already
+            // uses (smartmontools' Windows port doesn't always surface elevation failures as a
+            // clean "Access is denied") - reused here rather than a second detection heuristic.
+            let elevation_like = error_messages.iter().any(|m| {
+                let m = m.to_lowercase();
+                m.contains("invalid argument") || m.contains("permission denied") || m.contains("access is denied") || m.contains("input/output error")
+            });
+            let msg = if !error_messages.is_empty() {
+                format!("smartctl -a reported error(s): {}", error_messages.join("; "))
+            } else {
+                "query ran but none of percentage_used/temperature/power_on_hours were present - likely a non-NVMe drive (this parses the NVMe SMART log shape specifically) or the query genuinely failed.".to_string()
+            };
+            eprintln!("[pulse-telemetry] storageHealth: {msg}");
+            let code = if elevation_like { "elevation-required" } else { "no-data-returned" };
+            return (None, Some(reason(code, msg)));
         }
 
-        Some(json!({
-            // Inverted (100 - wear-used%) to a "health" framing, matching derived.ts's
-            // storageWearToHealthPercent - a higher number reads as better, consistent with
-            // every other health percentage in this project.
-            "healthPercent": percentage_used.map(|p| 100 - p),
-            "temperatureC": temperature_c,
-            "powerOnHours": power_on_hours,
-        }))
+        (
+            Some(json!({
+                // Inverted (100 - wear-used%) to a "health" framing, matching derived.ts's
+                // storageWearToHealthPercent - a higher number reads as better, consistent with
+                // every other health percentage in this project.
+                "healthPercent": percentage_used.map(|p| 100 - p),
+                "temperatureC": temperature_c,
+                "powerOnHours": power_on_hours,
+            })),
+            None,
+        )
     })();
 
     // HWiNFO is a second, optional real source for exactly three fields this project previously
@@ -839,6 +882,7 @@ fn run_collect() {
         "gpu": gpu,
         "network": network,
         "storageHealth": storage_health,
+        "storageHealthReason": storage_health_reason,
         "secureBootEnabled": secure_boot_enabled,
         "bitlockerStatus": bitlocker_status,
         "hwinfo": hwinfo_json,
