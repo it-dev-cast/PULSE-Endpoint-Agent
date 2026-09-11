@@ -2408,6 +2408,59 @@ async function runPendingCommandIfAny(credentials, pendingCommand) {
   }
 }
 
+// Second remote-dispatch trigger source, alongside runPendingCommandIfAny's heartbeat-polled
+// path (backend/device_commands.go) - a genuinely different origin (Nexus One's Command
+// Dispatch, via this device's own MQTT connection instead of Pulse Endpoint's HTTP backend), but
+// the exact same runRemediationAction underneath: neither REMEDIATION_ACTIONS nor the
+// policy-check/logging in runRemediationAction is touched or duplicated here, only the trigger
+// differs, same as that function's own comment already says about its two existing callers.
+//
+// Reporting back can't reuse POST .../commands/{id}/complete - that row lives in Pulse Endpoint's
+// OWN device_commands table, and an MQTT-dispatched command was never enqueued there at all
+// (Nexus One's Command Dispatch has no relationship with that backend/table). Reports back over
+// MQTT instead, to a per-command result topic - keeps this round-trip entirely inside the MQTT
+// relationship this device already just gained, with no new HTTP dependency or coupling to
+// nexus-core-api's own URL/auth. Consuming that result topic on the other end (forwarding it into
+// Nexus Core's own event/audit trail) is follow-up work for whatever consumes
+// casterly/devices/+/commands/+/result - not built here; this is only the device's own half.
+async function handleIncomingMqttCommand(client, deviceId, payload) {
+  let body;
+  try {
+    body = JSON.parse(payload.toString("utf8"));
+  } catch (e) {
+    console.error(`[mqtt] command message was not valid JSON:`, e.message);
+    return;
+  }
+  const { id: commandId, action } = body;
+  if (!commandId) {
+    // No id means no addressable result topic to report back to - this is the one case that
+    // really can't be more than a local log line. An unrecognized action, unlike a missing id,
+    // does NOT get pre-checked here: runRemediationAction below already returns a real
+    // {succeeded:false, message:"unknown action"} for that (see its own `if (!action) return ...`),
+    // and reports it back over the result topic like any other outcome - exactly like
+    // runPendingCommandIfAny's own HTTP path, which never pre-validates the action either and
+    // always POSTs a completion either way. Special-casing it here would only mean a bad/typo'd
+    // action gets silently dropped instead of a real "failed: unknown action" result - the
+    // dispatcher would wait forever with no way to tell "rejected" apart from "never arrived".
+    console.error(`[mqtt] command message missing id:`, JSON.stringify(body));
+    return;
+  }
+
+  console.log(`[mqtt] received command ${commandId} (${action}) via casterly/devices/${deviceId}/commands`);
+  const result = await runRemediationAction(action);
+  const status = result.blocked ? "blocked" : result.succeeded ? "succeeded" : "failed";
+
+  client.publish(
+    `casterly/devices/${deviceId}/commands/${commandId}/result`,
+    JSON.stringify({ status, result: result.message }),
+    { qos: 1 },
+    (err) => {
+      if (err) console.error(`[mqtt] failed to publish result for command ${commandId}:`, err.message);
+      else console.log(`[mqtt] published result for command ${commandId}: ${status}`);
+    },
+  );
+}
+
 // Lets the UI show a real "Blocked" state proactively (before a user even clicks Run Now),
 // not just after an attempt - same real policy check, just without executing/logging anything.
 async function handleRemediationStatusProxy(req, res) {
@@ -3639,9 +3692,23 @@ function ensureMqttClient(deviceId) {
   client.on("connect", () => {
     console.log(`[mqtt] connected to ${MQTT_BROKER_URL} as ${deviceId}`);
     mqttRetryMs = MQTT_INITIAL_RETRY_MS; // a real successful connect resets backoff for the next drop
+    // Stage 1 of the Nexus One command-dispatch path - a second, independent trigger source for
+    // the exact same REMEDIATION_ACTIONS this device already runs via Pulse Endpoint's HTTP
+    // heartbeat poll (see handleIncomingMqttCommand's own comment).
+    client.subscribe(`casterly/devices/${deviceId}/commands`, { qos: 1 }, (err) => {
+      if (err) console.error(`[mqtt] failed to subscribe to commands topic:`, err.message);
+      else console.log(`[mqtt] subscribed to casterly/devices/${deviceId}/commands`);
+    });
   });
   client.on("error", (err) => {
     console.error(`[mqtt] connection error:`, err.message);
+  });
+  client.on("message", (topic, payload) => {
+    if (topic === `casterly/devices/${deviceId}/commands`) {
+      handleIncomingMqttCommand(client, deviceId, payload).catch((e) =>
+        console.error(`[mqtt] command handling failed:`, e.message),
+      );
+    }
   });
   // 'close' fires for both a failed initial connect and a later drop - reconnectPeriod: 0 above
   // means mqtt.js won't retry either case on its own, so both are handled uniformly here. Guarded
