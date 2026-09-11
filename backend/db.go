@@ -105,3 +105,45 @@ func splitSQLStatements(sqlText string) []string {
 	}
 	return stmts
 }
+
+// fixRemoteCommandExecutionColumnType repairs a real, live-caught bug: tenants.
+// remote_command_execution_enabled originally shipped as INTEGER, but is read/written throughout
+// this codebase as a Go bool (see settings.go) - a parameterized UPDATE with a bool argument
+// against an INTEGER column fails at the database level (confirmed directly; the GET path's
+// integer-into-bool Scan tolerates it, the write does not). schema.sql's own ADD COLUMN IF NOT
+// EXISTS now declares BOOLEAN for a fresh install, but can't repair an already-migrated database
+// where the column exists as INTEGER - and the natural fix (a conditional PL/pgSQL DO block)
+// can't live in schema.sql at all, since splitSQLStatements above has no awareness of
+// dollar-quoted bodies and shreds any block needing an internal "END IF;"/"END;" terminator
+// (confirmed directly - this broke startup entirely the first time). Run once after
+// runMigrations, in Go, where a normal conditional and two independent statements are actually
+// available. Only ever alters when genuinely needed (checked first), so this is cheap and
+// harmless to run on every startup rather than needing to be removed after one use.
+func fixRemoteCommandExecutionColumnType(db *DB) error {
+	var dataType string
+	err := db.QueryRow(
+		`SELECT data_type FROM information_schema.columns WHERE table_name = 'tenants' AND column_name = 'remote_command_execution_enabled'`,
+	).Scan(&dataType)
+	if err == sql.ErrNoRows {
+		return nil // column doesn't exist yet somehow - runMigrations already would have failed first
+	}
+	if err != nil {
+		return fmt.Errorf("check remote_command_execution_enabled column type: %w", err)
+	}
+	if dataType == "boolean" {
+		return nil
+	}
+	// The existing INTEGER default has to go first - confirmed directly, Postgres refuses TYPE
+	// BOOLEAN on a column with a DEFAULT it can't auto-cast (a plain integer literal isn't one),
+	// even with USING telling it how to convert the column's actual DATA.
+	if _, err := db.Exec(`ALTER TABLE tenants ALTER COLUMN remote_command_execution_enabled DROP DEFAULT`); err != nil {
+		return fmt.Errorf("drop remote_command_execution_enabled default: %w", err)
+	}
+	if _, err := db.Exec(`ALTER TABLE tenants ALTER COLUMN remote_command_execution_enabled TYPE BOOLEAN USING (remote_command_execution_enabled::integer <> 0)`); err != nil {
+		return fmt.Errorf("convert remote_command_execution_enabled to boolean: %w", err)
+	}
+	if _, err := db.Exec(`ALTER TABLE tenants ALTER COLUMN remote_command_execution_enabled SET DEFAULT false`); err != nil {
+		return fmt.Errorf("reset remote_command_execution_enabled default: %w", err)
+	}
+	return nil
+}

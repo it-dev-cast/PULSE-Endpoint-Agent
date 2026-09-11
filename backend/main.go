@@ -67,6 +67,9 @@ func main() {
 	if err := runMigrations(db); err != nil {
 		log.Fatalf("failed to run migrations: %v", err)
 	}
+	if err := fixRemoteCommandExecutionColumnType(db); err != nil {
+		log.Fatalf("failed to repair remote_command_execution_enabled column type: %v", err)
+	}
 	if err := maybeMigrateFromSQLite(db); err != nil {
 		log.Fatalf("failed to migrate SQLite data into PostgreSQL: %v", err)
 	}

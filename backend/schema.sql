@@ -19,9 +19,26 @@ CREATE TABLE IF NOT EXISTS tenants (
 -- row below, not a replacement for it: a plan change alone must never silently turn on "run
 -- anything on every enrolled laptop" for a tenant that hasn't deliberately opted in here too.
 -- Same dedicated-column reasoning as offline_threshold_minutes above (one tenant, one real
--- setting, a purpose-built column rather than a generic key/value table). Defaults to 0 (off) -
--- an upgraded database never silently gains this capability.
-ALTER TABLE tenants ADD COLUMN IF NOT EXISTS remote_command_execution_enabled INTEGER NOT NULL DEFAULT 0;
+-- setting, a purpose-built column rather than a generic key/value table). Defaults to false (off)
+-- - an upgraded database never silently gains this capability. Native BOOLEAN, not the INTEGER
+-- 0/1-with-CHECK convention plan_features.included uses (that one predates this project's
+-- PostgreSQL move - see its own comment - and is only ever written via literal 0/1 in seed SQL,
+-- never through a parameterized Go bool). This column IS written that way (setRemoteCommandExecutionEnabled),
+-- and a real live test caught it: passing a Go bool as a query parameter against an INTEGER
+-- column fails at the database level (confirmed directly - the GET path's integer-into-bool Scan
+-- tolerates it, but the parameterized UPDATE does not), so this has to be a real boolean column
+-- to match the Go type it's actually read/written as.
+ALTER TABLE tenants ADD COLUMN IF NOT EXISTS remote_command_execution_enabled BOOLEAN NOT NULL DEFAULT false;
+-- A database that already ran the INTEGER version of the ALTER above before this fix needs its
+-- column type actually repaired - ADD COLUMN IF NOT EXISTS alone is a no-op once the column
+-- exists. NOT done here as a DO $$ ... $$ block: splitSQLStatements above (db.go) naively splits
+-- this whole file on bare ";" after stripping comments, with no awareness of dollar-quoted
+-- PL/pgSQL bodies - confirmed live (a DO block here shredded into invalid fragments and broke
+-- startup, since every PL/pgSQL block needs at least one internal terminator like "END IF;").
+-- Handled instead in Go, right after this file's own statements run (see fixRemoteCommandExecutionColumnType in db.go) - the same
+-- "step outside embedded SQL for anything conditional the splitter can't parse" reasoning this
+-- project already uses in describing where the old SQLite build's idempotent-column-add helpers
+-- lived before Postgres's ADD COLUMN IF NOT EXISTS made most of them unnecessary.
 
 -- status is the real device-registry lifecycle state PRD's device-registry/ component names
 -- ("Device inventory and lifecycle state") without defining exact values - active/revoked is a
