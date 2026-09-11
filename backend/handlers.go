@@ -119,8 +119,12 @@ func deviceFromContext(r *http.Request) (*Device, bool) {
 // command ID to report completion against. Full DeviceCommand (status/result/timestamps) has no
 // reason to round-trip back to the device that's about to determine those fields itself.
 type pendingCommandInfo struct {
-	ID     string `json:"id"`
-	Action string `json:"action"`
+	ID     string  `json:"id"`
+	Action string  `json:"action"`
+	// Params carries the admin-supplied command text (etc.) for "run-custom-command" - see
+	// device_commands.go's customCommandParams. Absent/null for every other action, which needs
+	// nothing beyond its fixed action id.
+	Params *string `json:"params,omitempty"`
 }
 
 func handleHeartbeat(db *DB) http.HandlerFunc {
@@ -147,7 +151,7 @@ func handleHeartbeat(db *DB) http.HandlerFunc {
 		if cmd, err := getOldestPendingCommand(db, device.ID); err != nil {
 			log.Printf("heartbeat: getOldestPendingCommand failed for device %s: %v", device.ID, err)
 		} else if cmd != nil {
-			pending = &pendingCommandInfo{ID: cmd.ID, Action: cmd.Action}
+			pending = &pendingCommandInfo{ID: cmd.ID, Action: cmd.Action, Params: cmd.Params}
 		}
 
 		writeJSON(w, http.StatusOK, map[string]interface{}{

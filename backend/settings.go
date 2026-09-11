@@ -99,3 +99,78 @@ func handlePatchOfflineThreshold(db *DB) http.HandlerFunc {
 		writeJSON(w, http.StatusOK, offlineThresholdResponse{Minutes: req.Minutes})
 	}
 }
+
+// Remote command/PowerShell execution's real, admin-configurable kill switch (schema.sql's own
+// comment on tenants.remote_command_execution_enabled) - a second, independent gate on top of
+// plan_features' "Remote Command Execution" row (see isRemoteCommandExecutionAllowed in
+// device_commands.go, which checks both). Read fresh on every check, same reasoning as
+// getOfflineThresholdMinutes above - a change takes effect on the very next dispatch attempt.
+func getRemoteCommandExecutionEnabled(db *DB, tenantID string) (bool, error) {
+	var enabled bool
+	err := db.QueryRow(`SELECT remote_command_execution_enabled FROM tenants WHERE id = ?`, tenantID).Scan(&enabled)
+	if err == sql.ErrNoRows {
+		return false, ErrNotFound
+	}
+	return enabled, err
+}
+
+func setRemoteCommandExecutionEnabled(db *DB, tenantID string, enabled bool) error {
+	res, err := db.Exec(`UPDATE tenants SET remote_command_execution_enabled = ? WHERE id = ?`, enabled, tenantID)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+type remoteCommandExecutionSettingResponse struct {
+	Enabled bool `json:"enabled"`
+}
+
+func handleGetRemoteCommandExecutionSetting(db *DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		tenantID := chi.URLParam(r, "id")
+		enabled, err := getRemoteCommandExecutionEnabled(db, tenantID)
+		if err == ErrNotFound {
+			writeError(w, http.StatusNotFound, "tenant not found")
+			return
+		}
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to read remote command execution setting")
+			return
+		}
+		writeJSON(w, http.StatusOK, remoteCommandExecutionSettingResponse{Enabled: enabled})
+	}
+}
+
+type patchRemoteCommandExecutionSettingRequest struct {
+	Enabled bool `json:"enabled"`
+}
+
+func handlePatchRemoteCommandExecutionSetting(db *DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		tenantID := chi.URLParam(r, "id")
+
+		var req patchRemoteCommandExecutionSettingRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid request body")
+			return
+		}
+
+		if err := setRemoteCommandExecutionEnabled(db, tenantID, req.Enabled); err == ErrNotFound {
+			writeError(w, http.StatusNotFound, "tenant not found")
+			return
+		} else if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to update remote command execution setting")
+			return
+		}
+
+		writeJSON(w, http.StatusOK, remoteCommandExecutionSettingResponse{Enabled: req.Enabled})
+	}
+}

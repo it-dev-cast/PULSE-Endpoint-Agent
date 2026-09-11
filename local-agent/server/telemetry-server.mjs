@@ -1434,6 +1434,37 @@ async function isSelfHealingAllowed() {
   }
 }
 
+// Same fresh-check-every-time, fail-closed reasoning as isSelfHealingAllowed above - deliberately
+// its own separate function/feature flag ("Remote Command Execution"), not folded into
+// Self-Healing's check, since arbitrary command execution is a categorically different level of
+// risk than the six fixed, reviewed remediation actions. Re-checked here even though the backend
+// already checked it at enqueue time (device_commands.go's isRemoteCommandExecutionAllowed) -
+// the same defense-in-depth reasoning as that Go function's own comment: this is the last real
+// gate before PowerShell actually runs, not something to trust purely from an earlier HTTP call.
+async function isRemoteCommandExecutionAllowed() {
+  if (!deviceCredentials) return false;
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), BACKEND_REQUEST_TIMEOUT_MS);
+    let body;
+    try {
+      const res = await fetch(`${BACKEND_URL}/v1/devices/${deviceCredentials.id}/entitlement`, {
+        headers: { Authorization: `Bearer ${deviceCredentials.apiKey}` },
+        signal: controller.signal,
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      body = await res.json();
+    } finally {
+      clearTimeout(timeoutId);
+    }
+    const feature = (body.features || []).find((f) => f.feature === "Remote Command Execution");
+    return feature?.included === true;
+  } catch (err) {
+    console.error("[telemetry] isRemoteCommandExecutionAllowed check failed - failing closed (refused):", err.message);
+    return false;
+  }
+}
+
 function execPowerShellCommand(command, timeoutMs = 15000) {
   return new Promise((resolve) => {
     execFile("powershell.exe", ["-NoProfile", "-Command", command], { maxBuffer: 10 * 1024 * 1024, timeout: timeoutMs }, (err, stdout, stderr) =>
@@ -2260,6 +2291,56 @@ async function runRemediationAction(actionId) {
   return { blocked: false, succeeded: result.succeeded, message: result.detail };
 }
 
+// Remote command/PowerShell execution - the 7th action, deliberately NOT added to
+// REMEDIATION_ACTIONS above: the "script" here is untrusted admin input, not one of six fixed,
+// reviewed code paths, so it gets its own execution function rather than sharing that dispatch
+// table. Success is exit-code-only (err set on non-zero exit or the 120s timeout) - unlike the
+// six fixed actions, this project doesn't know what the script does, so there's no stdout regex
+// marker to check for. Both stdout AND stderr are captured and reported back (truncated to
+// maxCustomCommandOutputLength) rather than just checking stdout and discarding stderr like most
+// of the fixed actions do - an arbitrary script's real diagnostic info could be on either stream.
+// There is deliberately no input sanitization here beyond what execPowerShellCommand already does
+// (a single execFile argument, no shell involved) - arbitrary execution IS the feature; filtering
+// the text would only create false confidence, not real safety (see this feature's own design
+// note: the safeguards are entirely about who can trigger it and how carefully, not the input).
+const maxCustomCommandOutputLength = 65536;
+async function runCustomCommand(commandText) {
+  const { err, stdout, stderr } = await execPowerShellCommand(commandText, 120000);
+  const succeeded = !err;
+  const parts = [];
+  if (stdout) parts.push(stdout.trim());
+  if (stderr) parts.push(`--- stderr ---\n${stderr.trim()}`);
+  if (!succeeded) parts.push(`--- error ---\n${err.message}`);
+  let detail = parts.join("\n\n").trim() || "(no output)";
+  if (detail.length > maxCustomCommandOutputLength) {
+    detail = detail.slice(0, maxCustomCommandOutputLength) + "\n[truncated]";
+  }
+  return { succeeded, detail };
+}
+
+// Mirrors runRemediationAction's own blocked/succeeded/failed shape and audit-logging
+// convention, but gated by isRemoteCommandExecutionAllowed (not isSelfHealingAllowed - see that
+// function's own comment on why this is a separate, more restrictive flag) and logged under its
+// own remote-command-* event types at "warning" severity even on success - a successful arbitrary
+// command is still inherently more sensitive than a successful "flush DNS," and should stand out
+// in the event feed accordingly (see backend/device_commands.go's matching comment).
+async function runCustomCommandAction(commandText, actor) {
+  const allowed = await isRemoteCommandExecutionAllowed();
+  if (!allowed) {
+    const message = "Remote command blocked - Remote Command Execution is not enabled for this tenant.";
+    logEvent("remote-command-blocked", `Command by ${actor}: ${message}`, "warning");
+    return { blocked: true, succeeded: false, message };
+  }
+
+  const result = await runCustomCommand(commandText);
+  const eventType = result.succeeded ? "remote-command-succeeded" : "remote-command-failed";
+  // Plain ASCII "..." (not "…") - the fan-reason encoding fix earlier tonight confirmed this
+  // exact Node SEA build pipeline mangles some non-ASCII characters in compiled string literals.
+  const preview = commandText.length > 200 ? `${commandText.slice(0, 200)}...` : commandText;
+  logEvent(eventType, `Command by ${actor}: ${preview}\n${result.detail}`, "warning");
+  return { blocked: false, succeeded: result.succeeded, message: result.detail };
+}
+
 async function handleRemediateProxy(req, res) {
   try {
     const body = JSON.parse(await readRequestBody(req));
@@ -2286,7 +2367,25 @@ async function handleRemediateProxy(req, res) {
 // logs unchanged.
 async function runPendingCommandIfAny(credentials, pendingCommand) {
   if (!pendingCommand) return;
-  const result = await runRemediationAction(pendingCommand.action);
+  let result;
+  if (pendingCommand.action === "run-custom-command") {
+    // pendingCommand.params arrives as a JSON-encoded STRING (Go's DeviceCommand.Params is a
+    // *string column, so json.Marshal emits it as an escaped string, not a nested object) - one
+    // parse needed before reading commandText/actor out of it.
+    let params = {};
+    try {
+      params = JSON.parse(pendingCommand.params ?? "{}");
+    } catch (e) {
+      console.error(`[telemetry] pending command ${pendingCommand.id} had unparseable params:`, e.message);
+    }
+    if (!params.commandText) {
+      result = { blocked: false, succeeded: false, message: "run-custom-command dispatched with no commandText - nothing to run." };
+    } else {
+      result = await runCustomCommandAction(params.commandText, params.actor || "unknown");
+    }
+  } else {
+    result = await runRemediationAction(pendingCommand.action);
+  }
   const status = result.blocked ? "blocked" : result.succeeded ? "succeeded" : "failed";
   try {
     const controller = new AbortController();

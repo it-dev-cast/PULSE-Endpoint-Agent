@@ -198,6 +198,17 @@ func main() {
 			// offline_detection.go) - previously a hardcoded Go constant.
 			r.Get("/tenants/{id}/settings/offline-threshold", handleGetOfflineThreshold(db))
 			r.Patch("/tenants/{id}/settings/offline-threshold", handlePatchOfflineThreshold(db))
+			// Remote command/PowerShell execution's own tenant-level kill switch (see
+			// schema.sql's own comment on tenants.remote_command_execution_enabled) - a second,
+			// independent gate on top of the plan entitlement, both required (see
+			// isRemoteCommandExecutionAllowed in device_commands.go).
+			r.Get("/tenants/{id}/settings/remote-command-execution", handleGetRemoteCommandExecutionSetting(db))
+			r.Patch("/tenants/{id}/settings/remote-command-execution", handlePatchRemoteCommandExecutionSetting(db))
+			// The one new read endpoint "run-custom-command" needs that the original 6
+			// remediation actions never did - full stdout/stderr can be far larger than the
+			// short summary that fits in the events feed's own message (see
+			// handleGetDeviceCommand's own comment).
+			r.Get("/tenants/{id}/devices/{deviceId}/commands/{commandId}", handleGetDeviceCommand(db))
 			// Real alert-rule CRUD (see alert_rules.go) - same tenant-scoped-create/list,
 			// ID-scoped-update/delete route shape as incidents.go/approval_requests above.
 			r.Get("/tenants/{id}/alert-rules", handleListAlertRules(db))

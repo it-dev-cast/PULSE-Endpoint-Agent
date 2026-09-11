@@ -14,6 +14,15 @@ CREATE TABLE IF NOT EXISTS tenants (
     created_at TEXT NOT NULL DEFAULT (to_char((CURRENT_TIMESTAMP AT TIME ZONE 'utc'), 'YYYY-MM-DD"T"HH24:MI:SS.MS') || 'Z')
 );
 
+-- Remote command/PowerShell execution's real, admin-configurable kill switch (see settings.go) -
+-- deliberately a SECOND, independent gate on top of plan_features' "Remote Command Execution"
+-- row below, not a replacement for it: a plan change alone must never silently turn on "run
+-- anything on every enrolled laptop" for a tenant that hasn't deliberately opted in here too.
+-- Same dedicated-column reasoning as offline_threshold_minutes above (one tenant, one real
+-- setting, a purpose-built column rather than a generic key/value table). Defaults to 0 (off) -
+-- an upgraded database never silently gains this capability.
+ALTER TABLE tenants ADD COLUMN IF NOT EXISTS remote_command_execution_enabled INTEGER NOT NULL DEFAULT 0;
+
 -- status is the real device-registry lifecycle state PRD's device-registry/ component names
 -- ("Device inventory and lifecycle state") without defining exact values - active/revoked is a
 -- reasonable minimal model: a revoked device's real API key is genuinely rejected on its next
@@ -159,6 +168,15 @@ CREATE TABLE IF NOT EXISTS device_commands (
 );
 
 CREATE INDEX IF NOT EXISTS idx_device_commands_device_id_status ON device_commands(device_id, status);
+
+-- Remote command/PowerShell execution (7th action, "run-custom-command") - the one action whose
+-- actual behavior isn't fixed Go/agent code, so it needs somewhere to carry the admin-supplied
+-- script text (and the actor label - see tenants.remote_command_execution_enabled below on why
+-- there's no real per-admin identity to attach instead). Generic JSONB, not a dedicated
+-- command_text column, so a future parameterized action doesn't need its own migration. This
+-- backend runs on PostgreSQL (see db.go), which supports ADD COLUMN IF NOT EXISTS natively - same
+-- reasoning as device_identity_public_key/warranty_voided_at above.
+ALTER TABLE device_commands ADD COLUMN IF NOT EXISTS params JSONB;
 
 -- Real, genuine time-series for AI Intel's SSD/Battery Remaining Life predictions - distinct
 -- from `events` above (a discrete log of things that happened) and from approval_requests (a
@@ -359,3 +377,9 @@ INSERT INTO plan_features (plan, feature, included)
 SELECT 'ProSupport', 'Alerts', 1 WHERE NOT EXISTS (SELECT 1 FROM plan_features WHERE plan = 'ProSupport' AND feature = 'Alerts');
 INSERT INTO plan_features (plan, feature, included)
 SELECT 'ProSupport', 'API Access', 1 WHERE NOT EXISTS (SELECT 1 FROM plan_features WHERE plan = 'ProSupport' AND feature = 'API Access');
+-- Arbitrary remote command/PowerShell execution - held back even further than Self-Healing's own
+-- fixed, reviewed 6-action vocabulary (full, unreviewed system access vs. six narrow, reversible
+-- actions), and gated a second time by tenants.remote_command_execution_enabled above - both must
+-- be true before a device will ever execute one.
+INSERT INTO plan_features (plan, feature, included)
+SELECT 'ProSupport', 'Remote Command Execution', 0 WHERE NOT EXISTS (SELECT 1 FROM plan_features WHERE plan = 'ProSupport' AND feature = 'Remote Command Execution');
