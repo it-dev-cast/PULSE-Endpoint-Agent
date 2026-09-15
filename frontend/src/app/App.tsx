@@ -2443,69 +2443,56 @@ function predictionToLifeDisplay(
 }
 
 function AITopPredictionsCard() {
-  const { thresholds } = useApp();
   const { data, connected } = useTelemetry();
-  const { storageWearHistory, batteryHealthHistory } = useTrendHistory(data, connected);
-  const predictions = connected ? data?.predictions ?? null : null;
+  // Still called here (not just relying on AIHealthScoreCard elsewhere on this page) so the
+  // underlying storage-wear/battery-health snapshot recording that feeds the AI service's
+  // remaining-life predictions keeps running even if this card's own mount order ever changes -
+  // recordIfNeeded no-ops once today's point is already recorded, so calling it from two cards
+  // isn't double-counted. The predictions themselves are no longer shown on THIS card (see GPU
+  // utilization/memory used below), but the underlying feature is still live and still maturing
+  // for whichever other page/future card wants it.
+  useTrendHistory(data, connected);
 
-  const ssdSpark = storageWearHistory.length > 0 ? storageWearHistory.slice(-10).map((p) => p.value) : [];
-  const ssdPrediction = predictionToLifeDisplay(predictions?.ssd ?? null, ssdSpark, "No extra wear");
-
-  const batterySpark = batteryHealthHistory.length > 0 ? batteryHealthHistory.slice(-10).map((p) => p.value) : [];
-  const batteryPrediction = predictionToLifeDisplay(predictions?.battery ?? null, batterySpark, "No decline detected");
-  const batteryHealthPct = getBatteryHealthPercent(data, connected);
-  const batteryHealthColor = colorForHealthPercent(
-    batteryHealthPct,
-    thresholds.batteryHealthWarning,
-    thresholds.batteryHealthCritical,
-  );
-  const batteryPredAccent =
-    batteryPrediction.subColor === "var(--clpa-critical)" || batteryPrediction.subColor === "var(--clpa-warning)"
-      ? batteryPrediction.subColor
-      : batteryHealthColor;
+  const gpuUtilization = connected ? data?.gpuUtilization ?? null : null;
+  const memUsedPct = getMemUsedPercent(data, connected);
 
   const cpuMinDistanceToTjMaxC = connected ? data?.hardwareMonitor?.cpuMinDistanceToTjMaxC ?? null : null;
   const thermalRiskReal = cpuMinDistanceToTjMaxC != null;
   const thermalRisk = thermalRiskReal ? thermalRiskFromMargin(cpuMinDistanceToTjMaxC) : null;
   const cpuLoad = getCpuLoad(data, connected);
 
-  const ssdBar =
-    ssdPrediction.value === "Due now" ? 100
-    : ssdPrediction.value === "Stable" ? 12
-    : ssdPrediction.sub.startsWith("Risk: High") ? 88
-    : ssdPrediction.sub.startsWith("Risk: Medium") ? 55
-    : ssdPrediction.real && ssdPrediction.state === "matured" ? 22
-    : 0;
-  const batteryBar =
-    batteryPrediction.value === "Due now" || batteryPrediction.value === "0" ? 100
-    : batteryHealthPct != null ? Math.max(0, 100 - batteryHealthPct)
-    : batteryPrediction.sub.startsWith("Risk: High") ? 90
-    : batteryPrediction.sub.startsWith("Risk: Medium") ? 55
-    : 0;
-
   const preds = [
     {
-      label: "SSD remaining life",
-      kind: "Forecast",
-      ...ssdPrediction,
-      icon: <HardDrive size={14} style={{ color: "var(--clpa-cyan-bright)" }} strokeWidth={2} />,
+      label: "GPU utilization",
+      kind: "Live",
+      value: gpuUtilization != null ? String(Math.round(gpuUtilization)) : "—",
+      unit: gpuUtilization != null ? "%" : "",
+      sub: gpuUtilization == null ? "No reading" : gpuUtilization >= 90 ? "High" : gpuUtilization >= 60 ? "Elevated" : "Normal",
+      subColor: gpuUtilization == null ? "var(--clpa-subtle)" : gpuUtilization >= 90 ? "var(--clpa-critical)" : gpuUtilization >= 60 ? "var(--clpa-warning)" : "var(--clpa-success)",
+      real: gpuUtilization != null,
+      confidence: undefined as "high" | "low" | undefined,
+      icon: <BarChart3 size={14} style={{ color: "var(--clpa-cyan-bright)" }} strokeWidth={2} />,
       iconBg: "rgba(var(--clpa-cyan-bright-rgb),0.12)",
-      data: ssdPrediction.sparkData,
+      data: [] as number[],
       sparkColor: "var(--clpa-cyan-bright)",
-      bar: ssdBar,
-      barColor: ssdPrediction.subColor === "var(--clpa-critical)" ? "var(--clpa-critical)" : "var(--clpa-cyan-bright)",
+      bar: gpuUtilization ?? 0,
+      barColor: gpuUtilization == null ? "var(--clpa-track)" : gpuUtilization >= 90 ? "var(--clpa-critical)" : gpuUtilization >= 60 ? "var(--clpa-warning)" : "var(--clpa-cyan-bright)",
     },
     {
-      label: "Battery remaining life",
-      kind: "Forecast",
-      ...batteryPrediction,
-      valueColor: batteryPredAccent,
-      icon: <Battery size={14} style={{ color: batteryPredAccent }} strokeWidth={2} />,
-      iconBg: "rgba(var(--clpa-warning-bright-rgb),0.12)",
-      data: batteryPrediction.sparkData,
-      sparkColor: batteryPredAccent,
-      bar: batteryBar,
-      barColor: batteryPredAccent,
+      label: "Memory used",
+      kind: "Live",
+      value: memUsedPct != null ? String(memUsedPct) : "—",
+      unit: memUsedPct != null ? "%" : "",
+      sub: memUsedPct == null ? "No reading" : memUsedPct >= 90 ? "High" : memUsedPct >= 70 ? "Elevated" : "Normal",
+      subColor: memUsedPct == null ? "var(--clpa-subtle)" : memUsedPct >= 90 ? "var(--clpa-critical)" : memUsedPct >= 70 ? "var(--clpa-warning)" : "var(--clpa-success)",
+      real: memUsedPct != null,
+      confidence: undefined as "high" | "low" | undefined,
+      icon: <MemoryStick size={14} style={{ color: "var(--clpa-primary)" }} strokeWidth={2} />,
+      iconBg: "rgba(var(--clpa-primary-rgb),0.12)",
+      data: [] as number[],
+      sparkColor: "var(--clpa-primary)",
+      bar: memUsedPct ?? 0,
+      barColor: memUsedPct == null ? "var(--clpa-track)" : memUsedPct >= 90 ? "var(--clpa-critical)" : memUsedPct >= 70 ? "var(--clpa-warning)" : "var(--clpa-primary)",
     },
     {
       label: "CPU load",
@@ -2545,8 +2532,8 @@ function AITopPredictionsCard() {
   return (
     <AICard style={{ padding: "12px 14px 10px" }}>
       <AIHeader
-        title="TOP PREDICTIONS"
-        tooltip="SSD and Battery remaining life from the AI service. CPU load and thermal margin from live sensors."
+        title="LIVE SYSTEM VITALS"
+        tooltip="GPU utilization, memory used, CPU load, and thermal margin - all real-time from local sensors, not predictions."
       />
       <div className="flex flex-col gap-2 flex-1 min-h-0">
         {preds.map((p) => (
@@ -2845,9 +2832,12 @@ function AIRecommendationsCard() {
   const recs: Rec[] = [];
 
   const security = getSecurityCompliance(data, connected);
+  const securityHealthPct = getSecurityHealthPercent(data, connected);
   const batteryPastThreshold = batteryHealthPct != null && batteryHealthPct < 80;
   const batteryPredElevated = batteryPrediction.real && isElevatedRisk(batteryPrediction);
   const ssdPredElevated = ssdPrediction.real && isElevatedRisk(ssdPrediction);
+  const windowsUpdate = connected ? data?.windowsUpdate ?? null : null;
+  const biosFirmwareUpdate = connected ? data?.biosFirmwareUpdate ?? null : null;
 
   if (security.real && !security.ok) {
     recs.push({
@@ -2856,8 +2846,34 @@ function AIRecommendationsCard() {
       iconBorder: "rgba(var(--clpa-warning-bright-rgb),0.2)",
       titleColor: "var(--clpa-warning)",
       title: "Security Hardening",
-      desc: describeSecuritySignals(data, connected),
+      desc: `${securityHealthPct}% compliant - ${describeSecuritySignals(data, connected)}`,
       priority: "High",
+    });
+  }
+
+  if (windowsUpdate != null && !windowsUpdate.upToDate && windowsUpdate.pendingCount > 0) {
+    recs.push({
+      icon: <Download size={15} color="var(--clpa-warning)" strokeWidth={2} />,
+      iconBg: "rgba(var(--clpa-warning-bright-rgb),0.1)",
+      iconBorder: "rgba(var(--clpa-warning-bright-rgb),0.2)",
+      titleColor: "var(--clpa-warning)",
+      title: "Windows Update",
+      desc: `${windowsUpdate.pendingCount} update${windowsUpdate.pendingCount === 1 ? "" : "s"} pending - install to close known vulnerabilities.`,
+      priority: windowsUpdate.pendingCount >= 3 ? "High" : "Medium",
+    });
+  }
+
+  if (biosFirmwareUpdate != null && biosFirmwareUpdate.updateAvailable) {
+    recs.push({
+      icon: <Settings size={15} color="var(--clpa-warning)" strokeWidth={2} />,
+      iconBg: "rgba(var(--clpa-warning-bright-rgb),0.1)",
+      iconBorder: "rgba(var(--clpa-warning-bright-rgb),0.2)",
+      titleColor: "var(--clpa-warning)",
+      title: "BIOS Update",
+      desc: biosFirmwareUpdate.latestVersion
+        ? `Firmware update available (v${biosFirmwareUpdate.latestVersion}).`
+        : "Firmware update available.",
+      priority: "Medium",
     });
   }
 
