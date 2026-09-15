@@ -842,10 +842,14 @@ function BatteryCard() {
   // are both present but contain only the standard empty-namespace system classes - no Dell
   // instrumentation provider is installed on this machine to populate them.
   const batteryTempC = connected && data?.hardwareMonitor?.batteryTemperatureC != null ? data.hardwareMonitor.batteryTemperatureC : null;
-  // Sensor self-diagnostic system: now surfaced (dash + real reason) instead of the whole "Temp"
-  // column disappearing whenever it's null - the comment above already establishes this is a
-  // genuine per-hardware fact, not a bug, so showing why is more honest than hiding it entirely.
+  // Sensor self-diagnostic system: only an actionable reason (a tool not found/needs elevation/
+  // discarded implausible reading - not this hardware's own genuine ceiling) keeps the Temp
+  // column visible as a dash + info icon; a genuine hardware-unsupported reason (or no reason at
+  // all) hides the whole column instead of a dead "—" - same convention as this card's own fan
+  // widget and the Command Center dashboard's DeviceDetail.jsx battery tile.
   const batteryTempReason = connected ? data?.batteryTemperatureCReason ?? null : null;
+  const batteryTempReasonActionable = batteryTempC == null && batteryTempReason != null && batteryTempReason.code !== "hardware-unsupported";
+  const showBatteryTemp = batteryTempC != null || batteryTempReasonActionable;
 
   // Real only when charge % itself is real (same condition as `pct` above).
   const chargeReal = chargePct != null;
@@ -960,7 +964,7 @@ function BatteryCard() {
         </div>
       </div>
 
-      <div className="grid grid-cols-3" style={{ borderTop: "1px solid var(--clpa-divider)", paddingTop: 9 }}>
+      <div className={showBatteryTemp ? "grid grid-cols-3" : "grid grid-cols-2"} style={{ borderTop: "1px solid var(--clpa-divider)", paddingTop: 9 }}>
         <div>
           <div style={{ fontSize: 9, color: "var(--clpa-subtle)" }}>Status</div>
           <div className="flex items-center gap-1">
@@ -984,15 +988,17 @@ function BatteryCard() {
             {healthLabel}
           </span>
         </div>
-        <div>
-          <div style={{ fontSize: 9, color: "var(--clpa-subtle)" }}>Temp</div>
-          <div className="flex items-center gap-1">
-            <span style={{ fontSize: 11, color: "var(--clpa-title)", fontWeight: 700 }}>
-              {batteryTempC != null ? `${Math.round(batteryTempC)}°C` : "—"}
-            </span>
-            {batteryTempC == null && batteryTempReason && <AIInfo text={batteryTempReason.message} />}
+        {showBatteryTemp && (
+          <div>
+            <div style={{ fontSize: 9, color: "var(--clpa-subtle)" }}>Temp</div>
+            <div className="flex items-center gap-1">
+              <span style={{ fontSize: 11, color: "var(--clpa-title)", fontWeight: 700 }}>
+                {batteryTempC != null ? `${Math.round(batteryTempC)}°C` : "—"}
+              </span>
+              {batteryTempReasonActionable && <AIInfo text={batteryTempReason!.message} />}
+            </div>
           </div>
-        </div>
+        )}
       </div>
       {batteries.length > 1 && (
         <div className="flex flex-col gap-1" style={{ borderTop: "1px solid var(--clpa-divider)", paddingTop: 8, marginTop: 8 }}>
