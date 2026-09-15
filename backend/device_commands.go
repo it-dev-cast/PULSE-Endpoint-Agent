@@ -163,6 +163,21 @@ func completeDeviceCommand(db *DB, id, status, result string, now time.Time) err
 type enqueueCommandRequest struct {
 	Action string          `json:"action"`
 	Params json.RawMessage `json:"params,omitempty"`
+	// BatchID is optional, client-generated, and only ever meaningful for the 6 canned actions -
+	// the dashboard's fleet-wide dispatch feature sets it so every device_commands row from the
+	// same multi-device dispatch can be correlated later (it's echoed into params below and into
+	// the dispatch event's own message). Never required for a normal single-device dispatch.
+	BatchID string `json:"batchId,omitempty"`
+}
+
+const maxBatchIDLength = 100
+
+// remediationBatchParams is the one Params shape a canned (non-custom-command) action ever gets -
+// only populated when BatchID is set. Kept distinct from customCommandParams (run-custom-command
+// already owns Params for its own shape; batch dispatch is explicitly out of scope for that
+// action per this feature's own design).
+type remediationBatchParams struct {
+	BatchID string `json:"batchId"`
 }
 
 // handleEnqueueCommand is the admin-facing dispatch entry point - "run action X on device Y."
@@ -232,6 +247,18 @@ func handleEnqueueCommand(db *DB, hub *liveHub) http.HandlerFunc {
 			}
 			s := string(encoded)
 			paramsToStore = &s
+		} else if req.BatchID != "" {
+			if len(req.BatchID) > maxBatchIDLength {
+				writeError(w, http.StatusBadRequest, fmt.Sprintf("batchId must be at most %d characters", maxBatchIDLength))
+				return
+			}
+			encoded, err := json.Marshal(remediationBatchParams{BatchID: req.BatchID})
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "internal error")
+				return
+			}
+			s := string(encoded)
+			paramsToStore = &s
 		}
 
 		pending, err := hasPendingCommand(db, device.ID)
@@ -273,7 +300,11 @@ func handleEnqueueCommand(db *DB, hub *liveHub) http.HandlerFunc {
 				eventType = "remote-command-requested"
 				severity = "warning"
 			} else {
-				msg = fmt.Sprintf("Remediation requested: %s on %s (command %s) - awaiting device pickup.", req.Action, device.Hostname, id)
+				if req.BatchID != "" {
+					msg = fmt.Sprintf("Remediation requested: %s on %s (command %s, batch %s) - awaiting device pickup.", req.Action, device.Hostname, id, req.BatchID)
+				} else {
+					msg = fmt.Sprintf("Remediation requested: %s on %s (command %s) - awaiting device pickup.", req.Action, device.Hostname, id)
+				}
 				eventType = "remediation-requested-" + req.Action
 			}
 			event := Event{
