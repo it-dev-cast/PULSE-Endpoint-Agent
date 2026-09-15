@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 import { Headphones } from "lucide-react";
 import { toast } from "sonner";
 import { type AlertItem } from "../data/alerts";
@@ -9,7 +9,6 @@ import { setTheme } from "../hooks/useTheme";
 import { setDensity } from "../hooks/useDensity";
 import { setAccentColor } from "../hooks/useAccentColor";
 import { setTelemetryEnabled } from "../hooks/useTelemetry";
-import { askCasterlySupport } from "../lib/supportChat";
 
 const DESKTOP_NOTIFS_KEY = "clpa:settings:desktop-notifications:v1";
 const SOUND_CRITICAL_KEY = "clpa:settings:sound-critical:v1";
@@ -67,8 +66,6 @@ function playCriticalTone() {
   }
 }
 
-export type ChatMessage = { who: "Customer" | "Support"; text: string };
-
 type AppContextValue = {
   activeScreen: string;
   navigate: (screen: string) => void;
@@ -80,13 +77,6 @@ type AppContextValue = {
   dismissAlert: (id: string) => void;
   snoozeAlert: (id: string) => void;
   refreshSync: () => void;
-  supportChatOpen: boolean;
-  toggleSupportChat: () => void;
-  setSupportChatOpen: (open: boolean) => void;
-  chatMessages: ChatMessage[];
-  chatBusy: boolean;
-  sendChatMessage: (text: string) => void;
-  clearChat: () => void;
   remoteSessionActive: boolean;
   startRemoteSession: (detail?: string) => void;
   endRemoteSession: () => void;
@@ -120,8 +110,6 @@ type AppContextValue = {
   dismissedButActive: LiveActiveRule[];
 };
 
-const INITIAL_CHAT: ChatMessage[] = [];
-
 const AppContext = createContext<AppContextValue | null>(null);
 
 function formatSyncTime(date = new Date()) {
@@ -132,12 +120,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [activeScreen, setActiveScreen] = useState("dashboard");
   const [alerts, setAlerts] = useState<AlertItem[]>([]);
   const [lastSynced, setLastSynced] = useState(() => formatSyncTime());
-  const [supportChatOpen, setSupportChatOpen] = useState(false);
-  const [chatMessages, setChatMessages] = useState<ChatMessage[]>(INITIAL_CHAT);
-  const [chatBusy, setChatBusy] = useState(false);
   const [remoteSessionActive, setRemoteSessionActive] = useState(false);
-  const chatMessagesRef = useRef<ChatMessage[]>(INITIAL_CHAT);
-  const chatGenRef = useRef(0);
 
   // Merge in any real, threshold-fired alerts from the engine (including ones restored from
   // localStorage on mount) without disturbing existing acknowledge/dismiss/snooze state for
@@ -362,44 +345,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
     [snoozeRule],
   );
 
-  const toggleSupportChat = useCallback(() => {
-    setSupportChatOpen((prev) => !prev);
-  }, []);
-
-  const sendChatMessage = useCallback((text: string) => {
-    const trimmed = text.trim();
-    if (!trimmed) return;
-    if (chatBusy) return;
-    const gen = chatGenRef.current;
-    const history = chatMessagesRef.current;
-    const nextUser: ChatMessage = { who: "Customer", text: trimmed };
-    chatMessagesRef.current = [...history, nextUser];
-    setChatMessages(chatMessagesRef.current);
-    setChatBusy(true);
-    void askCasterlySupport(trimmed, history)
-      .then((reply) => {
-        if (chatGenRef.current !== gen) return;
-        chatMessagesRef.current = [...chatMessagesRef.current, { who: "Support", text: reply }];
-        setChatMessages(chatMessagesRef.current);
-      })
-      .catch((err: unknown) => {
-        if (chatGenRef.current !== gen) return;
-        const message = err instanceof Error ? err.message : "Ollama did not reply.";
-        chatMessagesRef.current = [...chatMessagesRef.current, { who: "Support", text: message }];
-        setChatMessages(chatMessagesRef.current);
-      })
-      .finally(() => {
-        if (chatGenRef.current === gen) setChatBusy(false);
-      });
-  }, [chatBusy]);
-
-  const clearChat = useCallback(() => {
-    chatGenRef.current += 1;
-    chatMessagesRef.current = [];
-    setChatMessages([]);
-    setChatBusy(false);
-  }, []);
-
   const startRemoteSession = useCallback((detail?: string) => {
     setRemoteSessionActive(true);
     toast.success("Remote assist requested — Command Centre can Join now");
@@ -455,9 +400,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
         resetAllSettings();
         return;
       }
-      if (action === "user-menu") {
-        setSupportChatOpen(true);
-      }
     },
     [endRemoteSession, navigate, startRemoteSession, resetAllSettings],
   );
@@ -482,13 +424,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
         dismissAlert,
         snoozeAlert,
         refreshSync,
-        supportChatOpen,
-        toggleSupportChat,
-        setSupportChatOpen,
-        chatMessages,
-        chatBusy,
-        sendChatMessage,
-        clearChat,
         remoteSessionActive,
         startRemoteSession,
         endRemoteSession,

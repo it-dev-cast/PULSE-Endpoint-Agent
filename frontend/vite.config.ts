@@ -48,11 +48,6 @@ export default defineConfig({
       ignored: ['**/src-tauri/target/**'],
     },
     proxy: {
-      '/ollama': {
-        target: 'http://127.0.0.1:11434',
-        changeOrigin: true,
-        rewrite: (p) => p.replace(/^\/ollama/, ''),
-      },
       '/api': {
         target: 'http://127.0.0.1:4317',
         changeOrigin: true,
@@ -64,11 +59,6 @@ export default defineConfig({
     port: 5173,
     strictPort: true,
     proxy: {
-      '/ollama': {
-        target: 'http://127.0.0.1:11434',
-        changeOrigin: true,
-        rewrite: (p) => p.replace(/^\/ollama/, ''),
-      },
       '/api': {
         target: 'http://127.0.0.1:4317',
         changeOrigin: true,

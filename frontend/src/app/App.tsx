@@ -78,8 +78,8 @@ import {
   HardDrive, Thermometer, Network, Battery, Server,
   ChevronDown, Zap, Activity, CheckCircle2, Clock, TrendingDown, Search,
   MonitorCheck, MemoryStick, Database, Layers,
-  Radio, Globe, Package, Fingerprint, BarChart3, MessageCircle, Send,
-  Gauge, Wind, Plug, Hash, Tag, Minus, Square, X, EyeOff, Lock, Trash2
+  Radio, Globe, Package, Fingerprint, BarChart3,
+  Gauge, Wind, Plug, Hash, Tag, Minus, Square, X, EyeOff, Lock
 } from "lucide-react";
 import { AppProvider, useApp, type QuietHours } from "./context/AppContext";
 import ScreenSharePOC from "./remote-poc/ScreenSharePOC";
@@ -100,7 +100,7 @@ import {
   CLPASectionTitle,
 } from "./components/shared/clpa";
 import { CLPA_TOKENS } from "./styles/tokens";
-import { CasterlyLogo, CasterlyMark } from "./components/shared/CasterlyLogo";
+import { CasterlyLogo } from "./components/shared/CasterlyLogo";
 import type { AlertSeverity } from "./data/alerts";
 import { SEVERITY_META, type AlertItem } from "./data/alerts";
 import { BATTERY_STATUS_LABELS, isBatteryOnAc } from "./data/batteryStatus";
@@ -169,7 +169,7 @@ function PageScrollArea({ activeScreen, children }: { activeScreen: string; chil
 }
 
 function AppShell() {
-  const { activeScreen, supportChatOpen, toggleSupportChat } = useApp();
+  const { activeScreen } = useApp();
   // Real gate (see useTelemetry's own isFirstLoad comment) - true until the first genuinely
   // real telemetry payload has ever arrived this session, not merely until the local server's
   // HTTP endpoint responds (that can happen before its first real collect() cycle finishes).
@@ -240,7 +240,6 @@ function AppShell() {
                   </PageScrollArea>
                 </div>
               </div>
-              <SupportChatWidget isOpen={supportChatOpen} onToggle={toggleSupportChat} />
             </>
           )}
         </div>
@@ -266,202 +265,6 @@ function StartupLoadingScreen() {
         <span style={{ fontSize: 11.5, color: "var(--clpa-muted)" }}>Connecting to agent…</span>
       </div>
     </div>
-  );
-}
-
-function SupportChatWidget({
-  isOpen,
-  onToggle,
-}: {
-  isOpen: boolean;
-  onToggle: () => void;
-}) {
-  const [input, setInput] = useState("");
-  const { chatMessages, sendChatMessage, chatBusy, clearChat } = useApp();
-  const listRef = useRef<HTMLDivElement | null>(null);
-
-  useEffect(() => {
-    listRef.current?.scrollTo({ top: listRef.current.scrollHeight, behavior: "smooth" });
-  }, [chatMessages, chatBusy]);
-
-  const sendMessage = () => {
-    const trimmed = input.trim();
-    if (!trimmed || chatBusy) return;
-    sendChatMessage(trimmed);
-    setInput("");
-  };
-
-  return (
-    <>
-      {isOpen && (
-        <div
-          style={{
-            position: "absolute",
-            right: 16,
-            bottom: 72,
-            width: 360,
-            height: 470,
-            borderRadius: 14,
-            background: "var(--clpa-card)",
-            border: "1px solid var(--clpa-input-border)",
-            boxShadow: "0 16px 42px rgba(15,23,42,0.2)",
-            zIndex: 30,
-            display: "flex",
-            flexDirection: "column",
-            overflow: "hidden",
-          }}
-        >
-          <div
-            style={{
-              padding: "10px 12px",
-              borderBottom: "1px solid var(--clpa-surface-border)",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "space-between",
-              background: "linear-gradient(135deg,var(--clpa-info-blue),var(--clpa-info-cyan))",
-            }}
-          >
-            <div className="flex items-center gap-2">
-              <div
-                className="flex items-center justify-center rounded-full"
-                style={{ width: 26, height: 26, background: "white", overflow: "hidden", flexShrink: 0 }}
-              >
-                <CasterlyMark size={22} />
-              </div>
-              <div>
-                <div style={{ fontSize: 11, fontWeight: 800, color: "white" }}>Casterly Support</div>
-                <div style={{ fontSize: 8, color: "rgba(255,255,255,0.85)" }}>Ask about this device</div>
-              </div>
-            </div>
-            <div className="flex items-center gap-0.5">
-              <button
-                type="button"
-                onClick={clearChat}
-                disabled={chatMessages.length === 0 && !chatBusy}
-                title="Clear chat"
-                aria-label="Clear chat"
-                style={{
-                  border: "none",
-                  background: "transparent",
-                  cursor: chatMessages.length === 0 && !chatBusy ? "default" : "pointer",
-                  padding: 4,
-                  opacity: chatMessages.length === 0 && !chatBusy ? 0.45 : 1,
-                }}
-              >
-                <Trash2 size={13} color="white" />
-              </button>
-              <button
-                onClick={onToggle}
-                style={{ border: "none", background: "transparent", cursor: "pointer", padding: 4 }}
-                aria-label="Close Casterly Support chat"
-              >
-                <X size={14} color="white" />
-              </button>
-            </div>
-          </div>
-
-          <div ref={listRef} className="clpa-scroll" style={{ flex: 1, overflowY: "auto", padding: "10px 10px 4px" }}>
-            <div className="flex flex-col gap-1.5">
-              {chatMessages.length === 0 && !chatBusy && (
-                <div style={{ fontSize: 9.5, color: "var(--clpa-subtle)", lineHeight: 1.4, padding: "8px 4px" }}>
-                  Ask about this PC. Replies come from Ollama on this machine, using live telemetry — not canned scripts.
-                </div>
-              )}
-              {chatMessages.map((m, idx) => {
-                const mine = m.who === "Customer";
-                return (
-                  <div key={idx} className={`flex ${mine ? "justify-end" : "justify-start"}`}>
-                    <div
-                      style={{
-                        maxWidth: "82%",
-                        borderRadius: 10,
-                        padding: "7px 9px",
-                        background: mine ? "rgba(var(--clpa-primary-rgb),0.12)" : "var(--clpa-surface)",
-                        border: `1px solid ${mine ? "rgba(var(--clpa-primary-rgb),0.25)" : "var(--clpa-input-border)"}`,
-                      }}
-                    >
-                      <div style={{ fontSize: 7.5, color: "var(--clpa-subtle)", marginBottom: 2 }}>{mine ? "You" : "Casterly Support"}</div>
-                      <div style={{ fontSize: 9.5, color: "var(--clpa-body)", lineHeight: 1.35, whiteSpace: "pre-wrap" }}>{m.text}</div>
-                    </div>
-                  </div>
-                );
-              })}
-              {chatBusy && (
-                <div className="flex justify-start">
-                  <div style={{ borderRadius: 10, padding: "7px 9px", background: "var(--clpa-surface)", border: "1px solid var(--clpa-input-border)" }}>
-                    <div style={{ fontSize: 7.5, color: "var(--clpa-subtle)", marginBottom: 2 }}>Casterly Support</div>
-                    <div style={{ fontSize: 9.5, color: "var(--clpa-muted)" }}>Thinking…</div>
-                  </div>
-                </div>
-              )}
-            </div>
-          </div>
-
-          <div style={{ borderTop: "1px solid var(--clpa-surface-border)", padding: "8px 10px" }}>
-            <div className="flex items-center gap-1.5">
-              <input
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") sendMessage();
-                }}
-                disabled={chatBusy}
-                placeholder={chatBusy ? "Waiting for Ollama…" : "Type your message..."}
-                style={{
-                  flex: 1,
-                  height: 32,
-                  borderRadius: 8,
-                  border: "1px solid var(--clpa-input-border)",
-                  background: "var(--clpa-surface)",
-                  padding: "0 10px",
-                  outline: "none",
-                  fontSize: 9.5,
-                  color: "var(--clpa-body)",
-                }}
-              />
-              <button
-                onClick={sendMessage}
-                disabled={chatBusy}
-                className="flex items-center justify-center"
-                style={{
-                  width: 32,
-                  height: 32,
-                  border: "none",
-                  borderRadius: 8,
-                  background: "var(--clpa-primary)",
-                  cursor: "pointer",
-                }}
-              >
-                <Send size={13} color="white" />
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      <button
-        onClick={onToggle}
-        className="flex items-center justify-center"
-        style={{
-          position: "absolute",
-          right: 16,
-          bottom: 16,
-          border: "none",
-          borderRadius: "50%",
-          background: "linear-gradient(135deg,var(--clpa-info-blue),var(--clpa-info-cyan))",
-          color: "white",
-          width: 48,
-          height: 48,
-          cursor: "pointer",
-          boxShadow: "0 10px 22px rgba(var(--clpa-info-blue-rgb),0.45)",
-          zIndex: 31,
-        }}
-        aria-label={isOpen ? "Close Casterly Support chat" : "Open Casterly Support chat"}
-        title={isOpen ? "Close Casterly Support" : "Casterly Support"}
-      >
-        {isOpen ? <X size={16} color="white" /> : <MessageCircle size={18} color="white" />}
-      </button>
-    </>
   );
 }
 
