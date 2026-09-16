@@ -380,6 +380,14 @@ export type ThermalRow = {
   reason?: { code: string; message: string } | null;
 };
 
+// Sensor self-diagnostic system: a reason is worth showing (dash + info icon) only when it's
+// actually fixable (tool not found, needs elevation, an implausible reading discarded) - a
+// genuine hardware-unsupported ceiling, or no reason at all, should hide the row entirely instead
+// of a dead dash. Mirrors the dashboard's own isActionable() (liveDetail.js) exactly.
+function isActionableReason(reason?: { code: string; message: string } | null): boolean {
+  return reason != null && reason.code !== "hardware-unsupported";
+}
+
 function thermalTempRow(
   label: string,
   tempC: number | null,
@@ -433,21 +441,30 @@ export function getThermalRows(data: Snapshot, connected: boolean, cpuWarning: n
   const hasLabeled = [cpuTempC, gpuTempC, ssdTempC, moboTempC, dimmTempC].some((t) => t != null);
   if (hasLabeled) {
     const ssd = ssdThermalThresholds(data);
-    return [
+    const gpuActionable = isActionableReason(data?.gpuTempCReason);
+    const moboActionable = isActionableReason(data?.motherboardTempCReason);
+    // Same isActionable-gated hide/show DeviceDetail.jsx's StatCard tiles already use for Battery
+    // Temp: a genuine hardware-unsupported reason (or no reason at all) omits the row entirely
+    // rather than a dead dash+icon; an actionable reason (tool-not-found, needs elevation) still
+    // shows dash+icon. CPU Temp and SSD Temp are unchanged - CPU has no reason system at all, and
+    // this project's own convention here was never asked to change for SSD.
+    const rows: (ThermalRow | null)[] = [
       thermalTempRow("CPU Temp", cpuTempC, cpuWarning, cpuCritical),
-      thermalTempRow("GPU Temp", gpuTempC, GPU_TEMP_WARNING_C, GPU_TEMP_CRITICAL_C, data?.gpuTempCReason),
+      gpuTempC != null || gpuActionable
+        ? thermalTempRow("GPU Temp", gpuTempC, GPU_TEMP_WARNING_C, GPU_TEMP_CRITICAL_C, data?.gpuTempCReason)
+        : null,
       thermalTempRow("SSD Temp", ssdTempC, ssd.warning, ssd.critical, data?.storageHealthReason),
       // Motherboard and DIMM share this one row slot (whichever sensor is actually available wins
-      // the label) - motherboardTempCReason only ever applies to the genuine "neither found"
-      // case, not the "DIMM filled in instead" case, since that case already has a real value to
-      // show and isn't the row thermalTempRow's own reason display would even apply to (its
-      // `reason: tempC == null ? ... : null` already suppresses it whenever a value is present).
+      // the label). The "neither found" case now also respects isActionable, same as GPU above.
       moboTempC != null
         ? thermalTempRow("Motherboard", moboTempC, DIMM_TEMP_WARNING_C, DIMM_TEMP_CRITICAL_C)
         : dimmTempC != null
         ? thermalTempRow("DIMM Temp", dimmTempC, DIMM_TEMP_WARNING_C, DIMM_TEMP_CRITICAL_C)
-        : thermalTempRow("Motherboard", null, DIMM_TEMP_WARNING_C, DIMM_TEMP_CRITICAL_C, data?.motherboardTempCReason),
+        : moboActionable
+        ? thermalTempRow("Motherboard", null, DIMM_TEMP_WARNING_C, DIMM_TEMP_CRITICAL_C, data?.motherboardTempCReason)
+        : null,
     ];
+    return rows.filter((r): r is ThermalRow => r != null);
   }
   const zones = (data?.thermal ?? [])
     .map((zone, i) => {
