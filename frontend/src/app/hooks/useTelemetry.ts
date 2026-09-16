@@ -310,6 +310,8 @@ export type TelemetrySnapshot = {
   fanRpmReason?: SensorReason | null;
   batteryCycleCountReason?: SensorReason | null;
   batteryTemperatureCReason?: SensorReason | null;
+  gpuTempCReason?: SensorReason | null;
+  motherboardTempCReason?: SensorReason | null;
   gpuUtilization: number | null;
   wifi: WifiInfo;
   logicalDisks: LogicalDisk[];

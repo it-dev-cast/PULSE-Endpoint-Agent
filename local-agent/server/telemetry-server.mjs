@@ -3315,6 +3315,13 @@ function extractLiveStatusFields(data) {
   putDetail(detail, "gpuDriverDate", parseWcfDate(firstGpu?.DriverDate));
   putDetail(detail, "gpuUtilPct", numOrNull(data?.gpuUtilization));
   putDetail(detail, "gpuTempC", numOrNull(data?.hardwareMonitor?.gpuTempC));
+  putReason(detail, "gpuTempCReason", data?.gpuTempCReason);
+  // motherboardTempC was computed in hardwareMonitor (see collect()'s own merge from LHM/HWiNFO)
+  // but never actually sent here until now - a real pre-existing gap, not a reason-code omission:
+  // the value itself never reached the backend on hardware where it IS available, independent of
+  // today's reason-code fix for when it isn't.
+  putDetail(detail, "motherboardTempC", numOrNull(data?.hardwareMonitor?.motherboardTempC));
+  putReason(detail, "motherboardTempCReason", data?.motherboardTempCReason);
   putDetail(detail, "batteryHealthPct", batteryHealthFromTelemetry(data));
   // batteryCycleCount reflects only rust's own corroborated reading (see the merge logic in
   // collect() that overwrites ps.batteryDetail.cycle.CycleCount from rust's verdict, not
@@ -4528,6 +4535,29 @@ async function collect() {
         // run, corrupted only in the compiled telemetry-server.exe) - not worth chasing that
         // pipeline bug when this project's own convention for joining a list is already ASCII.
         message: parts.join("; ") + " - null on hardware none of these expose a tachometer for.",
+      });
+    }
+    // gpuTempC has only one real source (LHM) - HWiNFO's reader has no GPU temperature field at
+    // all (confirmed directly: hwinfo.rs only pattern-matches a GPU *fan*, never a GPU temp), so
+    // this is a single-source reason, same shape as batteryTemperatureCReason, not the two/three-
+    // source combined reason fanRpm/motherboardTempC (below) need.
+    if (!parsed.hardwareMonitor?.gpuTempC) {
+      putReason(parsed, "gpuTempCReason", {
+        code: hardwareMonitor == null ? "tool-not-found" : "hardware-unsupported",
+        message: hardwareMonitor == null
+          ? "LibreHardwareMonitor: not reachable - install it and enable Options > Remote Web Server for GPU temp."
+          : "LibreHardwareMonitor: no GPU temperature sensor exposed on this hardware (HWiNFO has no GPU temp field either, so there's no second source to check).",
+      });
+    }
+    // motherboardTempC has the same two real sources as fanRpm (LHM and HWiNFO both expose a
+    // real Super I/O/system temp sensor when the hardware has one - see mergeHwInfoIntoHardwareMonitor
+    // and hwinfo.rs's own MOTHERBOARD_TEMP_PATTERNS), so this mirrors that reason's shape exactly.
+    if (!parsed.hardwareMonitor?.motherboardTempC) {
+      const moboLhmPart = hardwareMonitor == null ? "LibreHardwareMonitor: not reachable" : "LibreHardwareMonitor: no motherboard/system sensor exposed";
+      const moboHwinfoPart = rustData?.hwinfo == null ? "HWiNFO: not available" : "HWiNFO: no motherboard/system sensor exposed";
+      putReason(parsed, "motherboardTempCReason", {
+        code: hardwareMonitor == null && rustData?.hwinfo == null ? "tool-not-found" : "hardware-unsupported",
+        message: [moboLhmPart, moboHwinfoPart].join("; ") + " - null on hardware with no classic Super I/O motherboard/system temp sensor.",
       });
     }
     // HWiNFO-only facts with no LibreHardwareMonitor equivalent and no PS-side counterpart to

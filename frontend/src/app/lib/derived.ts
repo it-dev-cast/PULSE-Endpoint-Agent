@@ -435,11 +435,18 @@ export function getThermalRows(data: Snapshot, connected: boolean, cpuWarning: n
     const ssd = ssdThermalThresholds(data);
     return [
       thermalTempRow("CPU Temp", cpuTempC, cpuWarning, cpuCritical),
-      thermalTempRow("GPU Temp", gpuTempC, GPU_TEMP_WARNING_C, GPU_TEMP_CRITICAL_C),
+      thermalTempRow("GPU Temp", gpuTempC, GPU_TEMP_WARNING_C, GPU_TEMP_CRITICAL_C, data?.gpuTempCReason),
       thermalTempRow("SSD Temp", ssdTempC, ssd.warning, ssd.critical, data?.storageHealthReason),
+      // Motherboard and DIMM share this one row slot (whichever sensor is actually available wins
+      // the label) - motherboardTempCReason only ever applies to the genuine "neither found"
+      // case, not the "DIMM filled in instead" case, since that case already has a real value to
+      // show and isn't the row thermalTempRow's own reason display would even apply to (its
+      // `reason: tempC == null ? ... : null` already suppresses it whenever a value is present).
       moboTempC != null
         ? thermalTempRow("Motherboard", moboTempC, DIMM_TEMP_WARNING_C, DIMM_TEMP_CRITICAL_C)
-        : thermalTempRow(dimmTempC != null ? "DIMM Temp" : "Motherboard", dimmTempC, DIMM_TEMP_WARNING_C, DIMM_TEMP_CRITICAL_C),
+        : dimmTempC != null
+        ? thermalTempRow("DIMM Temp", dimmTempC, DIMM_TEMP_WARNING_C, DIMM_TEMP_CRITICAL_C)
+        : thermalTempRow("Motherboard", null, DIMM_TEMP_WARNING_C, DIMM_TEMP_CRITICAL_C, data?.motherboardTempCReason),
     ];
   }
   const zones = (data?.thermal ?? [])
