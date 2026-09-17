@@ -46,7 +46,6 @@ import {
   getMemUsedPercent,
   getPerformanceScore,
   getTpmStatus,
-  getOverallProtectionTier,
   getSecurityHealthPercent,
   getSecurityCompliance,
   describeSecuritySignals,
@@ -270,48 +269,7 @@ function StartupLoadingScreen() {
 
 // ─── Title Bar ────────────────────────────────────────────
 function TitleBar() {
-  const { data, connected } = useTelemetry();
-  const { thresholds } = useApp();
   const agentUpdate = useAgentUpdate(APP_VERSION);
-
-  // Worst-signal-wins across TPM/Secure Boot/BitLocker (same signals HWIntegrityCard checks) plus
-  // Battery and Storage's own existing card badges - see getOverallProtectionTier's own comment
-  // for why security alone can only ever reach "At Risk", never "Critical".
-  const { tier: protectionTier, anyReal: anyProtectionSignalReal } = getOverallProtectionTier(
-    data,
-    connected,
-    thresholds.batteryHealthWarning,
-    thresholds.batteryHealthCritical,
-  );
-
-  let protectionLabel: string;
-  let protectionDotColor: string;
-  let protectionTextColor: string;
-  let protectionSample = false;
-  // Deliberately literal, not var(--clpa-*) - this badge renders directly on TitleBar's own
-  // permanently-dark navy strip (see its background a few lines down), which - like the macOS-
-  // style window dots and the outer window bezel - doesn't flip with the app's own Light/Dark
-  // Theme setting (real branded chrome, not page content). A theme-reactive color here would
-  // become unreadable the moment Light mode's dark-tuned dot color got swapped for a
-  // barely-visible-on-navy light-mode value.
-  if (!connected) {
-    protectionLabel = "OFFLINE";
-    protectionDotColor = "#EF4444";
-    protectionTextColor = "#F87171";
-  } else if (anyProtectionSignalReal) {
-    protectionLabel = protectionTier === "Critical" ? "CRITICAL" : protectionTier === "At Risk" ? "AT RISK" : "HEALTHY";
-    protectionDotColor = protectionTier === "Critical" ? "#EF4444" : protectionTier === "At Risk" ? "#F59E0B" : "#22C55E";
-    protectionTextColor = protectionTier === "Critical" ? "#F87171" : protectionTier === "At Risk" ? "#FBBF24" : "#4ADE80";
-  } else {
-    // Connected, but none of the 5 signals (TPM/Secure Boot/BitLocker/Battery/Storage) could
-    // actually be checked - keep the original "Healthy" look rather than inventing a new label,
-    // but disclose it's unverified instead of silently asserting it, same as every other
-    // real-or-sample value in this app.
-    protectionLabel = "HEALTHY";
-    protectionDotColor = "#22C55E";
-    protectionTextColor = "#4ADE80";
-    protectionSample = true;
-  }
 
   // Real Tauri v2 window commands (getCurrentWindow() from @tauri-apps/api/window) - a genuine
   // no-op outside the Tauri desktop app (plain browser dev/preview has no real window to
@@ -385,14 +343,6 @@ function TitleBar() {
       </div>
 
       <div className="flex items-center gap-2">
-        <div className="flex items-center gap-1.5">
-          <div className="clpa-dot w-1.5 h-1.5 rounded-full" style={{ background: protectionDotColor }} />
-          <span style={{ color: protectionTextColor, fontSize: 10.5, letterSpacing: 0.5, fontWeight: 600 }}>{protectionLabel}</span>
-          {protectionSample && <SampleTag />}
-        </div>
-
-        <div style={{ width: 1, height: 16, background: "rgba(255,255,255,0.12)" }} />
-
         <button onClick={onMinimize} style={{ width: 24, height: 20, border: "none", borderRadius: 5, background: "transparent", cursor: "pointer" }}>
           <Minus size={13} color="#9FB3C8" />
         </button>
