@@ -1,4 +1,6 @@
-# Deploy target: /opt/commandcenter/compose.yaml on nexusone-dev-app-01 (192.168.0.36).
+# Deploy target: /opt/commandcenter/compose.yaml on nexusone-dev-app-01 (192.168.0.189 - moved
+# from 192.168.0.36 after an office move, same physical server, confirmed via matching SSH host
+# key fingerprint).
 # Mirrors /opt/nexusone/compose.yaml's own shape exactly (postgres + api, private bridge network,
 # named volume, host ports on 127.0.0.1 only) - a new, fully isolated stack, never sharing a
 # container, volume, or network with nexusone/n8n/nexusauth's own.

@@ -144,10 +144,12 @@ var
   BackendUrlEdit: TNewEdit;
 
 const
-  // The real, deployed Command Center server (192.168.0.36, LAN-reachable via nginx on port 80 -
-  // NOT :8443, which is loopback-only on that host by design). Update this if the server ever
-  // moves; someone needing a different backend picks Custom address instead of editing this.
-  KNOWN_COMMAND_CENTER_URL = 'http://192.168.0.36';
+  // The real, deployed Command Center server (192.168.0.189, LAN-reachable via nginx on port 80 -
+  // NOT :8443, which is loopback-only on that host by design). Moved from 192.168.0.36 after an
+  // office move (2026-09-17) - same physical server, confirmed via matching SSH host key
+  // fingerprint, just a new DHCP lease on the new network. Update this if the server ever moves
+  // again; someone needing a different backend picks Custom address instead of editing this.
+  KNOWN_COMMAND_CENTER_URL = 'http://192.168.0.189';
 
 function CmdLineBackendUrl(): String;
 begin
